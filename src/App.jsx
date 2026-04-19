@@ -15,7 +15,7 @@ import * as XLSX from "xlsx";
 // ═══════════════════════════════════════════════════════════════════════════
 const DAYS = [
   {
-    id: "push", n: 1, label: "Push", sub: "Chest · Shoulders · Triceps", color: "#E5484D",
+    id: "push", n: 1, label: "Push", sub: "Chest · Shoulders · Triceps", color: "#C25A3E",
     exercises: [
       { name: "Barbell Bench Press",      sets: 4, reps: "8–10",  rest: "2 min" },
       { name: "Incline DB Press",          sets: 3, reps: "10–12", rest: "90 s"  },
@@ -27,8 +27,9 @@ const DAYS = [
     ],
   },
   {
-    id: "pull", n: 2, label: "Pull", sub: "Back · Biceps · Rear Delts", color: "#0091FF",
+    id: "pull", n: 2, label: "Pull", sub: "Back · Biceps · Rear Delts", color: "#3D6B7A",
     exercises: [
+      { name: "Pull-ups",                  sets: 4, reps: "6–10",  rest: "2 min" },
       { name: "Cable Row (Seated)",        sets: 4, reps: "10–12", rest: "90 s"  },
       { name: "Lat Pulldown",              sets: 4, reps: "10–12", rest: "90 s"  },
       { name: "Dumbbell Row (Single Arm)", sets: 3, reps: "10–12", rest: "90 s"  },
@@ -38,7 +39,7 @@ const DAYS = [
     ],
   },
   {
-    id: "legs", n: 3, label: "Legs", sub: "Quads · Hamstrings · Calves", color: "#F5A623",
+    id: "legs", n: 3, label: "Legs", sub: "Quads · Hamstrings · Calves", color: "#6B7A3D",
     exercises: [
       { name: "Barbell Back Squat", sets: 4, reps: "8–10",  rest: "2 min" },
       { name: "Leg Extension",       sets: 3, reps: "12–15", rest: "60 s"  },
@@ -49,27 +50,130 @@ const DAYS = [
 ];
 const findDay = id => DAYS.find(d => d.id === id);
 
+// Exercise library — common exercises grouped by category, with sensible defaults.
+// User can also type a custom name if what they want isn't here.
+const EXERCISE_LIBRARY = [
+  {
+    category: "Chest",
+    items: [
+      { name: "Bench Press", sets: 4, reps: "8–10", rest: "2 min" },
+      { name: "Incline DB Press", sets: 3, reps: "10–12", rest: "90 s" },
+      { name: "Decline Bench Press", sets: 3, reps: "8–10", rest: "90 s" },
+      { name: "Dumbbell Fly", sets: 3, reps: "12–15", rest: "60 s" },
+      { name: "Cable Fly", sets: 3, reps: "12–15", rest: "60 s" },
+      { name: "Push-ups", sets: 3, reps: "AMRAP", rest: "60 s" },
+      { name: "Dips (Chest)", sets: 3, reps: "8–12", rest: "90 s" },
+    ],
+  },
+  {
+    category: "Back",
+    items: [
+      { name: "Pull-ups", sets: 4, reps: "6–10", rest: "2 min" },
+      { name: "Chin-ups", sets: 4, reps: "6–10", rest: "2 min" },
+      { name: "Lat Pulldown", sets: 4, reps: "10–12", rest: "90 s" },
+      { name: "Seated Cable Row", sets: 4, reps: "10–12", rest: "90 s" },
+      { name: "Barbell Row", sets: 4, reps: "8–10", rest: "2 min" },
+      { name: "Dumbbell Row (Single Arm)", sets: 3, reps: "10–12", rest: "90 s" },
+      { name: "T-Bar Row", sets: 3, reps: "8–10", rest: "90 s" },
+      { name: "Deadlift", sets: 3, reps: "5–8", rest: "3 min" },
+      { name: "Face Pull", sets: 3, reps: "15–20", rest: "60 s" },
+      { name: "Straight-Arm Pulldown", sets: 3, reps: "12–15", rest: "60 s" },
+    ],
+  },
+  {
+    category: "Shoulders",
+    items: [
+      { name: "Overhead Press (Barbell)", sets: 4, reps: "6–8", rest: "2 min" },
+      { name: "Dumbbell Shoulder Press", sets: 4, reps: "10–12", rest: "90 s" },
+      { name: "Arnold Press", sets: 3, reps: "10–12", rest: "90 s" },
+      { name: "Lateral Raises (Dumbbell)", sets: 4, reps: "12–15", rest: "60 s" },
+      { name: "Lateral Raises (Cable)", sets: 4, reps: "12–15", rest: "60 s" },
+      { name: "Rear Delt Fly", sets: 3, reps: "15–20", rest: "60 s" },
+      { name: "Front Raise", sets: 3, reps: "12–15", rest: "60 s" },
+      { name: "Upright Row", sets: 3, reps: "10–12", rest: "60 s" },
+      { name: "Shrugs", sets: 3, reps: "12–15", rest: "60 s" },
+    ],
+  },
+  {
+    category: "Arms",
+    items: [
+      { name: "Barbell Curl", sets: 3, reps: "8–10", rest: "60 s" },
+      { name: "EZ Bar Curl", sets: 3, reps: "10–12", rest: "60 s" },
+      { name: "Dumbbell Curl", sets: 3, reps: "10–12", rest: "60 s" },
+      { name: "Hammer Curl", sets: 3, reps: "10–12", rest: "60 s" },
+      { name: "Preacher Curl", sets: 3, reps: "10–12", rest: "60 s" },
+      { name: "Cable Curl", sets: 3, reps: "12–15", rest: "60 s" },
+      { name: "Tricep Pushdown", sets: 3, reps: "12–15", rest: "60 s" },
+      { name: "Overhead Tricep Extension", sets: 3, reps: "12–15", rest: "60 s" },
+      { name: "Skull Crushers", sets: 3, reps: "10–12", rest: "60 s" },
+      { name: "Close-Grip Bench Press", sets: 3, reps: "8–10", rest: "90 s" },
+      { name: "Dips (Triceps)", sets: 3, reps: "8–12", rest: "90 s" },
+    ],
+  },
+  {
+    category: "Legs",
+    items: [
+      { name: "Barbell Back Squat", sets: 4, reps: "8–10", rest: "2 min" },
+      { name: "Front Squat", sets: 4, reps: "6–8", rest: "2 min" },
+      { name: "Bulgarian Split Squat", sets: 3, reps: "8–10", rest: "90 s" },
+      { name: "Romanian Deadlift", sets: 3, reps: "8–10", rest: "2 min" },
+      { name: "Leg Press", sets: 4, reps: "10–12", rest: "2 min" },
+      { name: "Leg Extension", sets: 3, reps: "12–15", rest: "60 s" },
+      { name: "Leg Curl", sets: 3, reps: "12–15", rest: "60 s" },
+      { name: "Walking Lunges", sets: 3, reps: "10 each", rest: "90 s" },
+      { name: "Standing Calf Raise", sets: 4, reps: "15–20", rest: "60 s" },
+      { name: "Seated Calf Raise", sets: 3, reps: "15–20", rest: "60 s" },
+      { name: "Hip Thrust", sets: 3, reps: "8–12", rest: "90 s" },
+    ],
+  },
+  {
+    category: "Core",
+    items: [
+      { name: "Plank", sets: 3, reps: "45–60 s", rest: "45 s" },
+      { name: "Hanging Leg Raise", sets: 3, reps: "10–15", rest: "60 s" },
+      { name: "Cable Crunch", sets: 3, reps: "15–20", rest: "45 s" },
+      { name: "Ab Wheel Rollout", sets: 3, reps: "8–12", rest: "60 s" },
+      { name: "Russian Twist", sets: 3, reps: "20 total", rest: "45 s" },
+      { name: "Dead Bug", sets: 3, reps: "10 each", rest: "45 s" },
+    ],
+  },
+];
+
 // ═══════════════════════════════════════════════════════════════════════════
-// DESIGN TOKENS
+// DESIGN TOKENS — Warm palette with terracotta primary
 // ═══════════════════════════════════════════════════════════════════════════
 const c = {
-  bg:        "#FAFAFA",
-  panel:     "#F4F4F5",
-  card:      "#FFFFFF",
-  border:    "#E4E4E7",
-  borderSoft:"#EEEEEF",
-  text:      "#09090B",
-  text2:     "#52525B",
-  text3:     "#71717A",
-  text4:     "#A1A1AA",
-  accent:    "#09090B",
-  blue:      "#0091FF",
-  green:     "#00A656",
-  red:       "#E5484D",
-  orange:    "#F5A623",
-  shadowSm:  "0 1px 2px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.02)",
-  shadowMd:  "0 1px 3px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.04)",
-  shadowLg:  "0 4px 6px rgba(0,0,0,0.04), 0 12px 24px rgba(0,0,0,0.06)",
+  // Surfaces
+  bg:         "#FAF7F3",   // warm off-white page
+  panel:      "#F3EEE8",   // recessed / pressed panel
+  card:       "#FFFFFF",   // card surface
+  border:     "#E8E2D9",   // default border (warm)
+  borderSoft: "#F0EBE3",   // subtle divider
+  // Text (warm bias)
+  text:       "#1A1613",   // primary
+  text2:      "#5C544C",   // secondary
+  text3:      "#8A8078",   // tertiary
+  text4:      "#B8AEA4",   // muted
+  // Primary — terracotta
+  primary:    "#B4532A",
+  primaryDeep:"#9D4521",
+  // Day family (same L & S, different H)
+  push:       "#C25A3E",   // brick
+  pull:       "#3D6B7A",   // slate
+  legs:       "#6B7A3D",   // olive
+  // Semantic
+  success:    "#5B8A3A",   // olive-forest
+  danger:     "#A64434",   // deep terracotta-red
+  accent:     "#C98B2A",   // warm gold (PRs)
+  // Legacy aliases (some old code still references these by name)
+  blue:       "#3D6B7A",
+  green:      "#5B8A3A",
+  red:        "#A64434",
+  orange:     "#C98B2A",
+  // Shadows (warm-tinted)
+  shadowSm:   "0 1px 2px rgba(60,40,20,0.04), 0 1px 3px rgba(60,40,20,0.02)",
+  shadowMd:   "0 1px 3px rgba(60,40,20,0.05), 0 4px 12px rgba(60,40,20,0.04)",
+  shadowLg:   "0 4px 6px rgba(60,40,20,0.04), 0 12px 24px rgba(60,40,20,0.06)",
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -78,7 +182,7 @@ const c = {
 function GlobalCSS() {
   return (
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;550;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;550;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700;9..144,800&display=swap');
       *, *::before, *::after { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
       html, body { margin: 0; padding: 0; background: ${c.bg}; font-family: 'Inter', system-ui, sans-serif; color: ${c.text}; }
       button { border: none; background: none; padding: 0; cursor: pointer; font-family: inherit; color: inherit; -webkit-tap-highlight-color: transparent; }
@@ -87,12 +191,16 @@ function GlobalCSS() {
       input[type=number] { -moz-appearance: textfield; }
       select { -webkit-appearance: none; appearance: none; font-family: inherit; outline: none; }
       ::-webkit-scrollbar { display: none; }
+      .display { font-family: 'Fraunces', 'Iowan Old Style', 'Palatino', serif; font-feature-settings: 'ss01', 'ss02'; }
       .btn { transition: background 120ms ease, transform 100ms ease, opacity 100ms ease; }
       .btn:active { transform: scale(0.985); opacity: 0.85; }
       @keyframes slideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
       @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes pulseGlow { 0%, 100% { box-shadow: 0 2px 8px rgba(180,83,42,0.25); } 50% { box-shadow: 0 4px 16px rgba(180,83,42,0.45); } }
+      @keyframes completionScale { 0% { transform: scale(1); } 40% { transform: scale(1.04); } 100% { transform: scale(1); } }
       .slide-up { animation: slideUp 180ms cubic-bezier(0.16, 1, 0.3, 1) both; }
       .fade-in { animation: fadeIn 140ms ease both; }
+      .pulse-ready { animation: pulseGlow 2s ease-in-out infinite; }
       .hover-bg:hover { background: ${c.panel}; }
     `}</style>
   );
@@ -199,6 +307,86 @@ function findLastSet(history, exerciseName) {
     if (done.length) return done[done.length - 1];
   }
   return null;
+}
+
+// Returns the full array of completed sets from the MOST RECENT session
+// for this exercise, so we can prepopulate them in the next session.
+function findLastSessionSets(history, exerciseName) {
+  for (const w of history) {
+    const ex = (w.exercises || []).find(e => e.name === exerciseName);
+    if (!ex) continue;
+    const done = ex.sets.filter(s => s.done && s.weight !== "" && s.reps !== "");
+    if (done.length) return done.map(s => ({ weight: String(s.weight), reps: String(s.reps) }));
+  }
+  return null;
+}
+
+// Exercise name heuristics for progression logic:
+const LOWER_BODY_KEYWORDS = ["squat", "deadlift", "leg press", "lunge", "hip thrust", "calf"];
+const BODYWEIGHT_KEYWORDS = ["pull-up", "pullup", "chin-up", "chinup", "push-up", "pushup", "dip", "plank", "hanging"];
+
+function isLowerBody(name) {
+  const n = name.toLowerCase();
+  return LOWER_BODY_KEYWORDS.some(k => n.includes(k));
+}
+function isBodyweight(name) {
+  const n = name.toLowerCase();
+  return BODYWEIGHT_KEYWORDS.some(k => n.includes(k));
+}
+
+// Parse target reps like "8–10", "10-12", "AMRAP", "15" — returns { min, max } or null
+function parseRepTarget(repsStr) {
+  if (!repsStr || typeof repsStr !== "string") return null;
+  // Match "N-M" or "N–M" (regular or em-dash)
+  const range = repsStr.match(/(\d+)\s*[-–]\s*(\d+)/);
+  if (range) return { min: Number(range[1]), max: Number(range[2]) };
+  const single = repsStr.match(/(\d+)/);
+  if (single) return { min: Number(single[1]), max: Number(single[1]) };
+  return null;
+}
+
+// Build a recommendation for the next session's top set.
+// Returns { weight, reps, rationale } or null if there's no history yet.
+function recommendNextSet(history, exerciseName, targetRepsStr) {
+  const last = findLastSessionSets(history, exerciseName);
+  if (!last || !last.length) return null;
+
+  // Find last session's top set (heaviest weight; break ties by reps)
+  let topSet = last[0];
+  for (const s of last) {
+    const w = Number(s.weight), r = Number(s.reps);
+    const tw = Number(topSet.weight), tr = Number(topSet.reps);
+    if (w > tw || (w === tw && r > tr)) topSet = s;
+  }
+
+  const lastW = Number(topSet.weight);
+  const lastR = Number(topSet.reps);
+  const target = parseRepTarget(targetRepsStr);
+  const bodyweight = isBodyweight(exerciseName);
+  const increment = isLowerBody(exerciseName) ? 10 : 5;
+
+  // Bodyweight path: progress by reps, not weight.
+  if (bodyweight) {
+    if (target && lastR >= target.max) {
+      return { weight: String(lastW || 0), reps: String(lastR + 1), rationale: `+1 rep from last` };
+    }
+    return { weight: String(lastW || 0), reps: String(lastR + 1), rationale: `try +1 rep` };
+  }
+
+  // Weighted path: if hit top of range, bump weight and reset reps to bottom of range
+  if (target && lastR >= target.max) {
+    return {
+      weight: String(lastW + increment),
+      reps: String(target.min),
+      rationale: `+${increment} lb — hit ${lastR} reps last time`,
+    };
+  }
+  // Otherwise hold weight, try one more rep
+  return {
+    weight: String(lastW),
+    reps: String(lastR + 1),
+    rationale: `try +1 rep`,
+  };
 }
 
 function exerciseTimeSeries(workouts, name) {
@@ -422,6 +610,7 @@ export default function App() {
   const [detailWorkout, setDetailWorkout] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sheet, setSheet] = useState(null);
+  const [summary, setSummary] = useState(null); // shows session summary briefly after finishing
   const saveTimer = useRef(null);
 
   const isTab = screen === "home" || screen === "history" || screen === "progress";
@@ -486,13 +675,30 @@ export default function App() {
         dayId,
         startedAt: Date.now(),
         completedAt: null,
-        exercises: day.exercises.map(ex => ({
-          name: ex.name,
-          targetSets: ex.sets,
-          targetReps: ex.reps,
-          rest: ex.rest,
-          sets: Array.from({ length: ex.sets }, () => ({ weight: "", reps: "", done: false })),
-        })),
+        exercises: day.exercises.map(ex => {
+          const lastSession = findLastSessionSets(history, ex.name);
+          const numSets = ex.sets;
+          // Build sets array: prepopulate from last session if available,
+          // otherwise empty. NEVER mark as done — user must confirm each set.
+          const sets = Array.from({ length: numSets }, (_, i) => {
+            if (lastSession && lastSession[i]) {
+              return { weight: lastSession[i].weight, reps: lastSession[i].reps, done: false };
+            }
+            // If last session had fewer sets than target, use the last set's values as a fallback
+            if (lastSession && lastSession.length > 0) {
+              const fallback = lastSession[lastSession.length - 1];
+              return { weight: fallback.weight, reps: fallback.reps, done: false };
+            }
+            return { weight: "", reps: "", done: false };
+          });
+          return {
+            name: ex.name,
+            targetSets: numSets,
+            targetReps: ex.reps,
+            rest: ex.rest,
+            sets,
+          };
+        }),
       };
       setActive(w);
       setScreen("workout");
@@ -538,10 +744,26 @@ export default function App() {
       await persistWorkout(completed);
       await clearActiveStorage();
 
+      // Detect any new PRs set during this session
+      const historyBefore = history; // doesn't include `completed` yet
+      const prsBefore = computePRs(historyBefore);
+      const prsAfter = computePRs([completed, ...historyBefore]);
+      const prMap = new Map(prsBefore.map(p => [p.name, p.top]));
+      const newPRs = [];
+      for (const pr of prsAfter) {
+        const before = prMap.get(pr.name);
+        if (before === undefined || pr.top > before) {
+          // Only count as a PR hit in this session if it shows up in this workout's exercises
+          if (completed.exercises.find(e => e.name === pr.name)) {
+            newPRs.push(pr);
+          }
+        }
+      }
+
+      // Stash the workout into history and show summary
       setActive(null);
       setHistory(prev => [completed, ...prev.filter(w => w.id !== completed.id)]);
-      setTab("home");
-      setScreen("home");
+      setSummary({ workout: completed, newPRs });
     };
 
     if (!hasDone) {
@@ -625,7 +847,7 @@ export default function App() {
       <GlobalCSS />
       <div style={{
         maxWidth: 480, margin: "0 auto", minHeight: "100vh",
-        paddingBottom: isTab ? 76 : 0,
+        paddingBottom: isTab ? 82 : 0,
       }}>
         {screen === "home" ? (
           <HomeScreen
@@ -669,6 +891,158 @@ export default function App() {
 
       {isTab ? <BottomNav tab={tab} onSwitch={goTab} /> : null}
       {sheet ? <ActionSheet {...sheet} onDismiss={closeSheet} /> : null}
+      {summary ? (
+        <SessionSummary
+          workout={summary.workout}
+          newPRs={summary.newPRs}
+          onDismiss={() => {
+            setSummary(null);
+            setTab("home");
+            setScreen("home");
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SESSION SUMMARY — brief post-finish moment
+// ═══════════════════════════════════════════════════════════════════════════
+function SessionSummary({ workout, newPRs, onDismiss }) {
+  const day = findDay(workout.dayId);
+  const duration = workout.completedAt - workout.startedAt;
+  const sets = workoutSets(workout);
+  const vol = workoutVolume(workout);
+
+  // Auto-dismiss after 3s unless user has PRs (then hold for 4.5s)
+  useEffect(() => {
+    const holdMs = newPRs.length > 0 ? 4500 : 3000;
+    const t = setTimeout(onDismiss, holdMs);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <div
+      className="fade-in"
+      onClick={onDismiss}
+      style={{
+        position: "fixed", inset: 0, zIndex: 950,
+        background: "rgba(26,22,19,0.55)",
+        backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 20,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          maxWidth: 400, width: "100%",
+          background: c.card,
+          borderRadius: 20,
+          padding: "28px 24px 24px",
+          boxShadow: c.shadowLg,
+          animation: "completionScale 450ms cubic-bezier(0.16, 1, 0.3, 1) both",
+          textAlign: "center",
+          border: `1px solid ${c.border}`,
+        }}
+      >
+        {/* Day indicator */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 10 }}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: day ? day.color : c.primary }} />
+          <span style={{ fontSize: 12, fontWeight: 600, color: day ? day.color : c.primary, letterSpacing: "0.08em" }}>
+            {day ? day.label.toUpperCase() : "COMPLETE"}
+          </span>
+        </div>
+
+        {/* Main message */}
+        <h2 className="display" style={{
+          margin: "0 0 18px",
+          fontSize: 28, fontWeight: 600,
+          color: c.text, letterSpacing: "-0.02em", lineHeight: 1.1,
+        }}>
+          Nice work.
+        </h2>
+
+        {/* Stats grid */}
+        <div style={{
+          display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12,
+          padding: "16px 0",
+          borderTop: `0.5px solid ${c.borderSoft}`,
+          borderBottom: `0.5px solid ${c.borderSoft}`,
+          marginBottom: newPRs.length > 0 ? 16 : 0,
+        }}>
+          <SummaryStat label="Sets" value={sets} />
+          <SummaryStat label="Time" value={fmtDur(duration)} />
+          <SummaryStat label="Volume" value={fmtNum(vol)} unit="lb" />
+        </div>
+
+        {/* PRs (if any) */}
+        {newPRs.length > 0 ? (
+          <div>
+            <div style={{
+              fontSize: 11, fontWeight: 600, color: c.accent,
+              letterSpacing: "0.08em", textTransform: "uppercase",
+              marginBottom: 10,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+            }}>
+              <Trophy size={12} color={c.accent} strokeWidth={2.5} />
+              {newPRs.length === 1 ? "Personal Record" : `${newPRs.length} Personal Records`}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {newPRs.slice(0, 3).map((pr, i) => (
+                <div key={i} style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                  padding: "8px 12px",
+                  background: `${c.accent}0D`,
+                  border: `1px solid ${c.accent}33`,
+                  borderRadius: 8,
+                }}>
+                  <span style={{
+                    fontSize: 13, fontWeight: 500, color: c.text,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    textAlign: "left", minWidth: 0, flex: 1, marginRight: 8,
+                  }}>{pr.name}</span>
+                  <span style={{
+                    fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                    fontSize: 13, fontWeight: 600, color: c.accent,
+                    flexShrink: 0,
+                  }}>
+                    {pr.top}<span style={{ fontSize: 10, opacity: 0.7, marginLeft: 2 }}>lb</span>
+                    <span style={{ color: c.text4, margin: "0 5px" }}>×</span>
+                    {pr.reps}
+                  </span>
+                </div>
+              ))}
+              {newPRs.length > 3 ? (
+                <div style={{ fontSize: 11, color: c.text3, marginTop: 2 }}>
+                  + {newPRs.length - 3} more
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        <div style={{ fontSize: 11, color: c.text4, marginTop: 18, letterSpacing: "0.02em" }}>
+          Tap to dismiss
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryStat({ label, value, unit }) {
+  return (
+    <div>
+      <div style={{
+        fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+        fontSize: 22, fontWeight: 600, color: c.text, letterSpacing: "-0.01em",
+      }}>
+        {value}{unit ? <span style={{ fontSize: 12, color: c.text3, marginLeft: 2, fontWeight: 500 }}>{unit}</span> : null}
+      </div>
+      <div style={{ fontSize: 10, fontWeight: 600, color: c.text3, letterSpacing: "0.06em", textTransform: "uppercase", marginTop: 3 }}>
+        {label}
+      </div>
     </div>
   );
 }
@@ -685,7 +1059,7 @@ function BottomNav({ tab, onSwitch }) {
   return (
     <nav style={{
       position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 200,
-      background: "rgba(250, 250, 250, 0.82)",
+      background: "rgba(250, 247, 243, 0.82)",
       backdropFilter: "blur(20px)",
       WebkitBackdropFilter: "blur(20px)",
       borderTop: `0.5px solid ${c.border}`,
@@ -698,12 +1072,12 @@ function BottomNav({ tab, onSwitch }) {
             className="btn"
             style={{
               flex: 1, display: "flex", flexDirection: "column",
-              alignItems: "center", gap: 3, padding: "10px 0 18px",
-              color: tab === id ? c.text : c.text3,
+              alignItems: "center", gap: 4, padding: "11px 0 20px",
+              color: tab === id ? c.primary : c.text3,
             }}
           >
-            <Icon size={22} strokeWidth={tab === id ? 2.3 : 1.8} />
-            <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.02em" }}>{label}</span>
+            <Icon size={24} strokeWidth={tab === id ? 2.3 : 1.8} />
+            <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.02em" }}>{label}</span>
           </button>
         ))}
       </div>
@@ -732,16 +1106,16 @@ function StatTile({ label, value, unit }) {
       background: c.card,
       border: `1px solid ${c.border}`,
       borderRadius: 12,
-      padding: "12px 14px",
+      padding: "14px 16px",
       boxShadow: c.shadowSm,
     }}>
-      <div style={{ fontSize: 11, fontWeight: 500, color: c.text3 }}>{label}</div>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 5 }}>
+      <div style={{ fontSize: 12, fontWeight: 500, color: c.text3 }}>{label}</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 6 }}>
         <span style={{
           fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-          fontSize: 21, fontWeight: 600, color: c.text, letterSpacing: "-0.01em",
+          fontSize: 24, fontWeight: 600, color: c.text, letterSpacing: "-0.01em",
         }}>{value}</span>
-        {unit ? <span style={{ fontSize: 11, color: c.text3, fontWeight: 500 }}>{unit}</span> : null}
+        {unit ? <span style={{ fontSize: 12, color: c.text3, fontWeight: 500 }}>{unit}</span> : null}
       </div>
     </div>
   );
@@ -762,31 +1136,48 @@ function HomeScreen({ history, active, onStart, onResume }) {
   const nxt = nextDay(history);
   const nxtDay = findDay(nxt);
 
+  // Build 7-day week visualization: M T W T F S S
+  // Each day = { label, isToday, workout (or null) }
+  const todayIdx = (dow === 0 ? 6 : dow - 1);  // Monday=0 ... Sunday=6
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    const dayStart = d.getTime();
+    const dayEnd = dayStart + 86400000;
+    const wk = history.find(w => w.startedAt >= dayStart && w.startedAt < dayEnd);
+    return {
+      letter: ["M","T","W","T","F","S","S"][i],
+      isToday: i === todayIdx,
+      isPast: i < todayIdx,
+      workout: wk,
+    };
+  });
+
   return (
     <div className="slide-up">
-      <div style={{ padding: "44px 20px 6px" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-          <p style={{ margin: 0, fontSize: 13, fontWeight: 500, color: c.text3 }}>{greet()}</p>
+      <div style={{ padding: "36px 20px 8px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+          <p style={{ margin: 0, fontSize: 15, fontWeight: 500, color: c.text3 }}>{greet()}</p>
           <p style={{
-            margin: 0, fontSize: 11, fontWeight: 600,
+            margin: 0, fontSize: 12, fontWeight: 600,
             color: c.text3, letterSpacing: "0.02em", textTransform: "uppercase",
             fontFamily: "'JetBrains Mono', ui-monospace, monospace",
           }}>{fmtToday(Date.now())}</p>
         </div>
-        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: c.text, letterSpacing: "-0.025em", lineHeight: 1.1 }}>Peter</h1>
+        <h1 className="display" style={{ margin: 0, fontSize: 40, fontWeight: 600, color: c.text, letterSpacing: "-0.02em", lineHeight: 1 }}>Peter</h1>
       </div>
 
       {active ? (
-        <div style={{ padding: "16px 20px 0" }}>
+        <div style={{ padding: "14px 20px 0" }}>
           <button
             onClick={onResume}
             className="btn"
             style={{
               width: "100%",
-              background: c.text,
+              background: c.primary,
               color: "#fff",
               borderRadius: 12,
-              padding: "13px 14px",
+              padding: "15px 16px",
               display: "flex",
               alignItems: "center",
               gap: 12,
@@ -794,51 +1185,71 @@ function HomeScreen({ history, active, onStart, onResume }) {
             }}
           >
             <div style={{
-              width: 36, height: 36, borderRadius: 10,
+              width: 40, height: 40, borderRadius: 10,
               background: "rgba(255,255,255,0.15)",
               display: "flex", alignItems: "center", justifyContent: "center",
               flexShrink: 0,
             }}>
-              <Play size={16} fill="white" color="white" />
+              <Play size={18} fill="white" color="white" />
             </div>
             <div style={{ flex: 1, textAlign: "left" }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: "rgba(255,255,255,0.55)", letterSpacing: "0.04em" }}>IN PROGRESS</div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: "#fff", marginTop: 1 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "rgba(255,255,255,0.55)", letterSpacing: "0.04em" }}>IN PROGRESS</div>
+              <div style={{ fontSize: 17, fontWeight: 600, color: "#fff", marginTop: 2 }}>
                 Resume {findDay(active.dayId) ? findDay(active.dayId).label : ""}
               </div>
             </div>
-            <span style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", fontFamily: "'JetBrains Mono', ui-monospace, monospace" }}>
+            <span style={{ fontSize: 13, color: "rgba(255,255,255,0.5)", fontFamily: "'JetBrains Mono', ui-monospace, monospace" }}>
               {fmtDur(Date.now() - active.startedAt)}
             </span>
           </button>
         </div>
       ) : null}
 
-      <div style={{ padding: "16px 20px 0" }}>
-        <Card padded style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <div style={{
-            width: 56, height: 56, borderRadius: "50%",
-            border: `1.5px solid ${thisWeek > 0 ? c.text : c.border}`,
-            background: thisWeek > 0 ? c.text : "transparent",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            flexShrink: 0,
-          }}>
-            <span style={{
-              fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-              fontSize: 20, fontWeight: 600,
-              color: thisWeek > 0 ? "#fff" : c.text4,
-            }}>{thisWeek}</span>
-          </div>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 500, color: c.text3 }}>THIS WEEK</div>
-            <div style={{ fontSize: 17, fontWeight: 600, color: c.text, marginTop: 2, letterSpacing: "-0.01em" }}>
-              {thisWeek === 0 ? "No sessions" : `${thisWeek} ${thisWeek === 1 ? "session" : "sessions"}`}
+      <div style={{ padding: "14px 20px 0" }}>
+        <Card padded style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: c.text3, letterSpacing: "0.04em", textTransform: "uppercase" }}>This week</div>
+              <div style={{ fontSize: 20, fontWeight: 600, color: c.text, marginTop: 4, letterSpacing: "-0.015em" }}>
+                {thisWeek === 0 ? "No sessions yet" : `${thisWeek} ${thisWeek === 1 ? "session" : "sessions"}`}
+              </div>
             </div>
             {history.length > 2 ? (
-              <div style={{ fontSize: 12, color: c.text3, marginTop: 1 }}>
-                {avg} avg / week · {history.length} total
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", fontSize: 16, fontWeight: 600, color: c.primary }}>{avg}</div>
+                <div style={{ fontSize: 11, color: c.text3, marginTop: 1, letterSpacing: "0.02em" }}>avg/wk</div>
               </div>
             ) : null}
+          </div>
+          {/* 7-day bars */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+            {weekDays.map((d, i) => {
+              const dayColor = d.workout ? (findDay(d.workout.dayId)?.color ?? c.primary) : null;
+              return (
+                <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
+                  <div style={{
+                    height: 36, width: "100%", maxWidth: 32, borderRadius: 5,
+                    background: d.workout ? dayColor : c.panel,
+                    border: d.isToday && !d.workout ? `1.5px dashed ${c.primary}` : "none",
+                    position: "relative",
+                  }}>
+                    {d.isToday ? (
+                      <div style={{
+                        position: "absolute", bottom: -2, left: "50%", transform: "translateX(-50%)",
+                        width: 3, height: 3, borderRadius: "50%",
+                        background: c.primary,
+                      }} />
+                    ) : null}
+                  </div>
+                  <span style={{
+                    fontSize: 10, fontWeight: 600,
+                    color: d.isToday ? c.primary : (d.workout ? c.text2 : c.text4),
+                    letterSpacing: "0.02em",
+                    fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                  }}>{d.letter}</span>
+                </div>
+              );
+            })}
           </div>
         </Card>
       </div>
@@ -848,11 +1259,11 @@ function HomeScreen({ history, active, onStart, onResume }) {
         <StatTile label="Personal records" value={computePRs(history).length} />
       </div>
 
-      <div style={{ padding: "24px 20px 0" }}>
+      <div style={{ padding: "22px 20px 0" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <p style={{ margin: 0, fontSize: 12, fontWeight: 600, color: c.text3, letterSpacing: "0.04em", textTransform: "uppercase" }}>Start workout</p>
+          <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: c.text3, letterSpacing: "0.04em", textTransform: "uppercase" }}>Start workout</p>
           {nxtDay ? (
-            <p style={{ margin: 0, fontSize: 12, color: c.text3 }}>
+            <p style={{ margin: 0, fontSize: 13, color: c.text3 }}>
               Next: <strong style={{ color: c.text, fontWeight: 600 }}>{nxtDay.label}</strong>
             </p>
           ) : null}
@@ -871,14 +1282,14 @@ function HomeScreen({ history, active, onStart, onResume }) {
                   display: "flex",
                   alignItems: "center",
                   gap: 14,
-                  padding: "13px 16px",
+                  padding: "15px 16px",
                   textAlign: "left",
                   background: "transparent",
                   borderTop: i === 0 ? "none" : `0.5px solid ${c.borderSoft}`,
                 }}
               >
                 <div style={{
-                  width: 32, height: 32, borderRadius: 8,
+                  width: 36, height: 36, borderRadius: 9,
                   background: c.panel,
                   border: `1px solid ${c.border}`,
                   display: "flex", alignItems: "center", justifyContent: "center",
@@ -886,29 +1297,37 @@ function HomeScreen({ history, active, onStart, onResume }) {
                 }}>
                   <span style={{
                     fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                    fontSize: 13, fontWeight: 600, color: c.text,
+                    fontSize: 15, fontWeight: 600, color: c.text,
                   }}>{day.n}</span>
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 14, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>{day.label}</span>
+                    <span style={{ fontSize: 16, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>{day.label}</span>
                     {isNext ? (
                       <span style={{
-                        fontSize: 10, fontWeight: 500, color: c.text3,
-                        letterSpacing: "0.02em", padding: "1px 6px",
-                        border: `1px solid ${c.border}`, borderRadius: 4,
-                        background: c.panel,
-                      }}>NEXT</span>
+                        fontSize: 10, fontWeight: 600, color: c.primary,
+                        letterSpacing: "0.06em", padding: "3px 8px 3px 7px",
+                        border: `1px solid ${c.primary}40`,
+                        borderRadius: 99,
+                        background: `${c.primary}0D`,
+                        display: "inline-flex", alignItems: "center", gap: 5,
+                      }}>
+                        <span style={{
+                          width: 5, height: 5, borderRadius: "50%",
+                          background: c.primary, display: "inline-block",
+                        }} />
+                        NEXT
+                      </span>
                     ) : null}
                   </div>
-                  <p style={{ margin: "2px 0 0", fontSize: 12, color: c.text3 }}>{day.sub}</p>
+                  <p style={{ margin: "2px 0 0", fontSize: 13, color: c.text3 }}>{day.sub}</p>
                 </div>
                 <div style={{ textAlign: "right", flexShrink: 0 }}>
-                  <p style={{ margin: 0, fontSize: 11, fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: c.text3 }}>
+                  <p style={{ margin: 0, fontSize: 12, fontWeight: 500, fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: c.text3 }}>
                     {last ? timeAgo(last.startedAt) : "—"}
                   </p>
                 </div>
-                <ChevronRight size={15} color={c.text4} />
+                <ChevronRight size={17} color={c.text4} />
               </button>
             );
           })}
@@ -916,27 +1335,27 @@ function HomeScreen({ history, active, onStart, onResume }) {
       </div>
 
       {history.length > 0 ? (
-        <div style={{ padding: "24px 20px 0" }}>
-          <p style={{ margin: "0 0 10px", fontSize: 12, fontWeight: 600, color: c.text3, letterSpacing: "0.04em", textTransform: "uppercase" }}>Recent</p>
+        <div style={{ padding: "22px 20px 0" }}>
+          <p style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 600, color: c.text3, letterSpacing: "0.04em", textTransform: "uppercase" }}>Recent</p>
           <Card padded={false}>
             {history.slice(0, 3).map((w, i) => {
               const day = findDay(w.dayId);
               return (
                 <div key={w.id} style={{
                   display: "flex", alignItems: "center", gap: 12,
-                  padding: "12px 16px",
+                  padding: "14px 16px",
                   borderTop: i === 0 ? "none" : `0.5px solid ${c.borderSoft}`,
                 }}>
                   <div style={{
-                    width: 3, height: 28, borderRadius: 2,
+                    width: 3, height: 32, borderRadius: 2,
                     background: day ? day.color : c.text4,
                     flexShrink: 0,
                   }} />
                   <div style={{ flex: 1 }}>
-                    <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>
+                    <p style={{ margin: 0, fontSize: 15, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>
                       {day ? day.label : "Workout"}
                     </p>
-                    <p style={{ margin: "1px 0 0", fontSize: 12, color: c.text3 }}>
+                    <p style={{ margin: "2px 0 0", fontSize: 13, color: c.text3 }}>
                       {timeAgo(w.startedAt)} · {workoutSets(w)} sets · {fmtNum(workoutVolume(w))} lb
                     </p>
                   </div>
@@ -1043,28 +1462,28 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
     <div style={{ minHeight: "100vh", background: c.bg }}>
       <div style={{
         position: "sticky", top: 0, zIndex: 100,
-        background: "rgba(250, 250, 250, 0.9)",
+        background: "rgba(250, 247, 243, 0.9)",
         backdropFilter: "blur(20px)",
         WebkitBackdropFilter: "blur(20px)",
         borderBottom: `0.5px solid ${c.border}`,
       }}>
-        <div style={{ display: "flex", alignItems: "center", padding: "12px 16px", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", padding: "14px 16px", gap: 12 }}>
           <button onClick={onBack} className="btn" style={{
             display: "flex", alignItems: "center", color: c.text,
-            fontSize: 14, fontWeight: 500, gap: 2, flexShrink: 0,
+            fontSize: 16, fontWeight: 500, gap: 2, flexShrink: 0,
           }}>
-            <ChevronLeft size={18} strokeWidth={2} /> Back
+            <ChevronLeft size={20} strokeWidth={2} /> Back
           </button>
           <div style={{ flex: 1, textAlign: "center" }}>
-            <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>
+            <p style={{ margin: 0, fontSize: 16, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>
               {day ? day.label : "Workout"}
             </p>
-            <p style={{ margin: 0, fontFamily: "'JetBrains Mono', ui-monospace, monospace", fontSize: 10, color: c.text3 }}>
+            <p style={{ margin: "1px 0 0", fontFamily: "'JetBrains Mono', ui-monospace, monospace", fontSize: 12, color: c.text3 }}>
               {fmtDur(elapsed)} · {doneSets}/{totalSets} sets
             </p>
           </div>
           <button onClick={onDiscard} className="btn" style={{
-            color: c.red, fontWeight: 500, fontSize: 14, flexShrink: 0,
+            color: c.red, fontWeight: 500, fontSize: 15, flexShrink: 0,
           }}>Discard</button>
         </div>
         <div style={{ height: 2, background: c.borderSoft }}>
@@ -1084,6 +1503,7 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
             exercise={ex}
             index={ei}
             prev={findLastSet(history, ex.name)}
+            recommendation={recommendNextSet(history, ex.name, ex.targetReps)}
             dayColor={day ? day.color : c.text}
             isExpanded={!!expanded[ei]}
             isSwipedOpen={swiped === ei}
@@ -1110,13 +1530,13 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
             className="btn hover-bg"
             style={{
               width: "100%",
-              padding: "14px 0",
-              marginTop: 4,
+              padding: "16px 0",
+              marginTop: 6,
               borderRadius: 12,
               border: `1px dashed ${c.border}`,
               background: "transparent",
               color: c.text2,
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: 500,
               display: "flex",
               alignItems: "center",
@@ -1124,7 +1544,7 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
               gap: 6,
             }}
           >
-            <Plus size={14} strokeWidth={2} /> Add exercise
+            <Plus size={16} strokeWidth={2} /> Add exercise
           </button>
         )}
 
@@ -1136,7 +1556,7 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
             border: `1px solid ${c.border}`,
             borderRadius: 12,
             color: c.text3,
-            fontSize: 14,
+            fontSize: 15,
           }}>
             All exercises removed. Discard this session and start over.
           </div>
@@ -1145,30 +1565,44 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
 
       <div style={{
         position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 150,
-        background: "linear-gradient(to top, rgba(250,250,250,1) 55%, rgba(250,250,250,0))",
+        background: "linear-gradient(to top, rgba(250,247,243,1) 55%, rgba(250,247,243,0))",
         padding: "28px 16px 24px",
       }}>
         <div style={{ maxWidth: 480, margin: "0 auto" }}>
           <button
             onClick={onFinish}
-            className="btn"
+            className={`btn ${totalSets && doneSets === totalSets ? "pulse-ready" : ""}`}
             style={{
               width: "100%",
-              background: c.text,
-              color: "#fff",
+              position: "relative",
+              overflow: "hidden",
+              background: c.card,
+              border: `1.5px solid ${doneSets === 0 ? c.border : c.primary}`,
               borderRadius: 12,
-              padding: "15px 0",
-              fontSize: 15,
+              padding: "17px 0",
+              fontSize: 17,
               fontWeight: 600,
               letterSpacing: "-0.01em",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 8,
+              color: doneSets === totalSets && totalSets > 0 ? "#fff" : c.text,
               boxShadow: c.shadowMd,
+              transition: "color 300ms ease, border-color 300ms ease",
             }}
           >
-            <Check size={17} strokeWidth={2.5} /> Finish workout
+            {/* Progress fill */}
+            <div style={{
+              position: "absolute", left: 0, top: 0, bottom: 0,
+              width: `${totalSets ? (doneSets / totalSets) * 100 : 0}%`,
+              background: c.primary,
+              transition: "width 400ms cubic-bezier(0.16, 1, 0.3, 1)",
+              zIndex: 0,
+            }} />
+            {/* Content on top */}
+            <span style={{
+              position: "relative", zIndex: 1,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            }}>
+              <Check size={19} strokeWidth={2.5} /> Finish workout
+            </span>
           </button>
         </div>
       </div>
@@ -1177,7 +1611,7 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
 }
 
 function ExerciseCard({
-  exercise: ex, index: ei, prev, dayColor,
+  exercise: ex, index: ei, prev, recommendation, dayColor,
   isExpanded, isSwipedOpen,
   onToggleExpand, onSwipeOpen, onSwipeClose, onDelete,
   onEditSet, onToggleDone, onAddSet, onRemoveSet,
@@ -1266,7 +1700,7 @@ function ExerciseCard({
       {/* Red delete action, revealed behind */}
       <div style={{
         position: "absolute", inset: 0,
-        background: c.red, display: "flex",
+        background: c.danger, display: "flex",
         alignItems: "center", justifyContent: "flex-end",
         padding: "0 24px",
       }}>
@@ -1297,13 +1731,13 @@ function ExerciseCard({
         onTouchCancel={handleTouchEnd}
         style={{
           position: "relative",
-          background: c.card,
-          border: `1px solid ${c.border}`,
+          background: isComplete ? `${c.primary}08` : c.card,
+          border: `1px solid ${isComplete ? `${c.primary}33` : c.border}`,
           borderRadius: 12,
           overflow: "hidden",
           boxShadow: c.shadowSm,
           transform: `translateX(${isSwipedOpen ? -DELETE_REVEAL : 0}px)`,
-          transition: "transform 200ms cubic-bezier(0.16, 1, 0.3, 1)",
+          transition: "transform 200ms cubic-bezier(0.16, 1, 0.3, 1), background 300ms ease, border-color 300ms ease",
           willChange: "transform",
         }}
       >
@@ -1315,13 +1749,13 @@ function ExerciseCard({
             display: "flex",
             alignItems: "center",
             gap: 12,
-            padding: "13px 14px",
+            padding: "15px 16px",
             textAlign: "left",
             background: "transparent",
           }}
         >
           <ChevronDown
-            size={16}
+            size={18}
             color={c.text3}
             strokeWidth={2}
             style={{
@@ -1332,18 +1766,18 @@ function ExerciseCard({
           />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 14, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>{ex.name}</span>
+              <span style={{ fontSize: 16, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>{ex.name}</span>
             </div>
-            <p style={{ margin: "2px 0 0", fontSize: 12, color: c.text3 }}>
+            <p style={{ margin: "3px 0 0", fontSize: 13, color: c.text3 }}>
               {ex.targetSets} × {ex.targetReps} · Rest {ex.rest}
             </p>
           </div>
           <span style={{
             fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-            fontSize: 12, fontWeight: 600,
+            fontSize: 13, fontWeight: 600,
             color: isComplete ? c.green : c.text3,
-            padding: "2px 7px",
-            borderRadius: 5,
+            padding: "3px 9px",
+            borderRadius: 6,
             background: isComplete ? `${c.green}14` : c.panel,
             border: `1px solid ${isComplete ? `${c.green}40` : c.border}`,
             flexShrink: 0,
@@ -1354,23 +1788,44 @@ function ExerciseCard({
           <div style={{ borderTop: `0.5px solid ${c.borderSoft}` }}>
             {prev ? (
               <div style={{
-                padding: "8px 14px",
-                fontSize: 11,
-                fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                color: c.text3,
+                padding: "10px 16px",
                 background: c.panel,
                 borderBottom: `0.5px solid ${c.borderSoft}`,
               }}>
-                Last time: {prev.weight} lb × {prev.reps} reps
+                <div style={{
+                  fontSize: 12,
+                  fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                  color: c.text3,
+                }}>
+                  Last time: {prev.weight} lb × {prev.reps} reps
+                </div>
+                {recommendation ? (
+                  <div style={{
+                    marginTop: 4,
+                    fontSize: 12,
+                    fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                    color: c.green,
+                    fontWeight: 600,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 5,
+                  }}>
+                    <TrendingUp size={12} strokeWidth={2.5} />
+                    Try: {recommendation.weight} lb × {recommendation.reps}
+                    <span style={{ color: c.text3, fontWeight: 400, marginLeft: 2 }}>
+                      · {recommendation.rationale}
+                    </span>
+                  </div>
+                ) : null}
               </div>
             ) : null}
             <div style={{
               display: "grid",
-              gridTemplateColumns: "28px 1fr 1fr 52px",
+              gridTemplateColumns: "32px 1fr 1fr 60px",
               gap: 8,
-              padding: "7px 14px 4px",
-              fontSize: 10,
-              fontWeight: 500,
+              padding: "9px 16px 5px",
+              fontSize: 11,
+              fontWeight: 600,
               letterSpacing: "0.04em",
               color: c.text3,
               textTransform: "uppercase",
@@ -1397,19 +1852,19 @@ function ExerciseCard({
               className="btn hover-bg"
               style={{
                 width: "100%",
-                padding: "10px 0",
+                padding: "12px 0",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 gap: 6,
-                fontSize: 13,
+                fontSize: 14,
                 fontWeight: 500,
                 color: c.text,
                 background: "transparent",
                 borderTop: `0.5px solid ${c.borderSoft}`,
               }}
             >
-              <Plus size={14} strokeWidth={2} /> Add set
+              <Plus size={15} strokeWidth={2} /> Add set
             </button>
           </div>
         ) : null}
@@ -1419,32 +1874,42 @@ function ExerciseCard({
 }
 
 function AddExerciseForm({ onAdd, onCancel }) {
+  const [mode, setMode] = useState("library"); // "library" | "custom"
+  const [search, setSearch] = useState("");
+
+  // Custom form state (only used in custom mode)
   const [name, setName] = useState("");
   const [sets, setSets] = useState("3");
   const [reps, setReps] = useState("10–12");
   const [rest, setRest] = useState("90 s");
 
-  function handleSubmit() {
-    if (!name.trim()) return;
-    onAdd(name, sets, reps, rest);
-  }
+  const q = search.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!q) return EXERCISE_LIBRARY;
+    return EXERCISE_LIBRARY
+      .map(cat => ({
+        ...cat,
+        items: cat.items.filter(ex => ex.name.toLowerCase().includes(q)),
+      }))
+      .filter(cat => cat.items.length > 0);
+  }, [q]);
 
   const inputStyle = {
     width: "100%",
-    padding: "10px 12px",
-    fontSize: 14,
+    padding: "11px 13px",
+    fontSize: 15,
     fontWeight: 500,
     fontFamily: "'Inter', system-ui, sans-serif",
     border: `1px solid ${c.border}`,
-    borderRadius: 8,
+    borderRadius: 9,
     background: c.card,
     color: c.text,
     outline: "none",
   };
   const labelStyle = {
-    fontSize: 11, fontWeight: 500, color: c.text3,
-    letterSpacing: "0.02em", textTransform: "uppercase",
-    marginBottom: 4, display: "block",
+    fontSize: 11, fontWeight: 600, color: c.text3,
+    letterSpacing: "0.04em", textTransform: "uppercase",
+    marginBottom: 5, display: "block",
   };
 
   return (
@@ -1453,61 +1918,180 @@ function AddExerciseForm({ onAdd, onCancel }) {
       border: `1px solid ${c.border}`,
       borderRadius: 12,
       padding: 14,
-      marginTop: 4,
+      marginTop: 6,
       boxShadow: c.shadowSm,
     }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-        <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>New exercise</p>
-        <button onClick={onCancel} className="btn" style={{ color: c.text3, padding: 2 }}>
-          <X size={16} />
+        <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: c.text, letterSpacing: "-0.005em" }}>
+          {mode === "library" ? "Add exercise" : "Custom exercise"}
+        </p>
+        <button onClick={onCancel} className="btn" style={{ color: c.text3, padding: 4 }}>
+          <X size={18} />
         </button>
       </div>
-      <div style={{ marginBottom: 10 }}>
-        <label style={labelStyle}>Name</label>
-        <input
-          type="text"
-          value={name}
-          onChange={e => setName(e.target.value)}
-          placeholder="e.g. Face Pull"
-          autoFocus
-          style={inputStyle}
-        />
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 1fr", gap: 8, marginBottom: 12 }}>
-        <div>
-          <label style={labelStyle}>Sets</label>
-          <input type="number" inputMode="numeric" value={sets} onChange={e => setSets(e.target.value)} style={{ ...inputStyle, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" }} />
-        </div>
-        <div>
-          <label style={labelStyle}>Reps</label>
-          <input type="text" value={reps} onChange={e => setReps(e.target.value)} style={{ ...inputStyle, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" }} />
-        </div>
-        <div>
-          <label style={labelStyle}>Rest</label>
-          <input type="text" value={rest} onChange={e => setRest(e.target.value)} style={{ ...inputStyle, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" }} />
-        </div>
-      </div>
-      <button
-        onClick={handleSubmit}
-        disabled={!name.trim()}
-        className="btn"
-        style={{
-          width: "100%",
-          padding: "11px 0",
-          borderRadius: 9,
-          background: name.trim() ? c.text : c.panel,
-          color: name.trim() ? "#fff" : c.text4,
-          fontSize: 14,
-          fontWeight: 600,
-          letterSpacing: "-0.005em",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 6,
-        }}
-      >
-        <Plus size={14} strokeWidth={2.5} /> Add to workout
-      </button>
+
+      {mode === "library" ? (
+        <>
+          {/* Search input */}
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search exercises…"
+            autoFocus
+            style={{ ...inputStyle, marginBottom: 10 }}
+          />
+
+          {/* Categorized list */}
+          <div style={{
+            maxHeight: 320,
+            overflowY: "auto",
+            border: `1px solid ${c.border}`,
+            borderRadius: 9,
+            background: c.bg,
+          }}>
+            {filtered.length === 0 ? (
+              <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 13, color: c.text3 }}>
+                No matches. Try a different search or add a custom exercise.
+              </div>
+            ) : (
+              filtered.map((cat, ci) => (
+                <div key={cat.category}>
+                  <div style={{
+                    padding: "8px 14px 6px",
+                    fontSize: 10, fontWeight: 700, letterSpacing: "0.06em",
+                    color: c.text3, textTransform: "uppercase",
+                    background: c.panel,
+                    borderTop: ci === 0 ? "none" : `0.5px solid ${c.border}`,
+                    borderBottom: `0.5px solid ${c.borderSoft}`,
+                    position: "sticky", top: 0, zIndex: 1,
+                  }}>
+                    {cat.category}
+                  </div>
+                  {cat.items.map((ex, i) => (
+                    <button
+                      key={ex.name}
+                      onClick={() => onAdd(ex.name, ex.sets, ex.reps, ex.rest)}
+                      className="btn hover-bg"
+                      style={{
+                        width: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        padding: "11px 14px",
+                        textAlign: "left",
+                        background: c.card,
+                        borderTop: i === 0 ? "none" : `0.5px solid ${c.borderSoft}`,
+                      }}
+                    >
+                      <span style={{ fontSize: 14, fontWeight: 500, color: c.text, letterSpacing: "-0.005em" }}>
+                        {ex.name}
+                      </span>
+                      <span style={{
+                        fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                        fontSize: 11, color: c.text3,
+                        flexShrink: 0, marginLeft: 8,
+                      }}>
+                        {ex.sets}×{ex.reps}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Switch to custom */}
+          <button
+            onClick={() => setMode("custom")}
+            className="btn hover-bg"
+            style={{
+              width: "100%",
+              marginTop: 10,
+              padding: "11px 0",
+              borderRadius: 9,
+              background: "transparent",
+              border: `1px dashed ${c.border}`,
+              color: c.text2,
+              fontSize: 13,
+              fontWeight: 500,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+            }}
+          >
+            <Plus size={14} strokeWidth={2} /> Add a custom exercise
+          </button>
+        </>
+      ) : (
+        <>
+          <div style={{ marginBottom: 11 }}>
+            <label style={labelStyle}>Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="e.g. Landmine Press"
+              autoFocus
+              style={inputStyle}
+            />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 1fr", gap: 8, marginBottom: 13 }}>
+            <div>
+              <label style={labelStyle}>Sets</label>
+              <input type="number" inputMode="numeric" value={sets} onChange={e => setSets(e.target.value)} style={{ ...inputStyle, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" }} />
+            </div>
+            <div>
+              <label style={labelStyle}>Reps</label>
+              <input type="text" value={reps} onChange={e => setReps(e.target.value)} style={{ ...inputStyle, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" }} />
+            </div>
+            <div>
+              <label style={labelStyle}>Rest</label>
+              <input type="text" value={rest} onChange={e => setRest(e.target.value)} style={{ ...inputStyle, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" }} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => setMode("library")}
+              className="btn hover-bg"
+              style={{
+                flex: "0 0 auto",
+                padding: "12px 16px",
+                borderRadius: 10,
+                background: c.panel,
+                border: `1px solid ${c.border}`,
+                color: c.text,
+                fontSize: 14,
+                fontWeight: 500,
+              }}
+            >
+              Back
+            </button>
+            <button
+              onClick={() => { if (name.trim()) onAdd(name, sets, reps, rest); }}
+              disabled={!name.trim()}
+              className="btn"
+              style={{
+                flex: 1,
+                padding: "12px 0",
+                borderRadius: 10,
+                background: name.trim() ? c.text : c.panel,
+                color: name.trim() ? "#fff" : c.text4,
+                fontSize: 14,
+                fontWeight: 600,
+                letterSpacing: "-0.005em",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 6,
+              }}
+            >
+              <Plus size={15} strokeWidth={2.5} /> Add to workout
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1515,9 +2099,9 @@ function AddExerciseForm({ onAdd, onCancel }) {
 function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
   const ready = set.weight !== "" && set.reps !== "";
   const inputStyle = {
-    borderRadius: 7,
-    padding: "7px 4px",
-    fontSize: 14,
+    borderRadius: 8,
+    padding: "9px 4px",
+    fontSize: 16,
     fontWeight: 600,
     textAlign: "center",
     width: "100%",
@@ -1528,15 +2112,15 @@ function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
   return (
     <div style={{
       display: "grid",
-      gridTemplateColumns: "28px 1fr 1fr 52px",
+      gridTemplateColumns: "32px 1fr 1fr 60px",
       gap: 8,
-      padding: "5px 14px",
+      padding: "7px 16px",
       alignItems: "center",
       background: set.done ? `${dayColor}0A` : "transparent",
     }}>
       <span style={{
         fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-        fontSize: 12, fontWeight: 600,
+        fontSize: 14, fontWeight: 600,
         color: set.done ? dayColor : c.text3,
       }}>{idx + 1}</span>
       <input
@@ -1545,6 +2129,7 @@ function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
         value={set.weight}
         placeholder={prev && prev.weight !== undefined ? String(prev.weight) : "—"}
         onChange={e => onChange("weight", e.target.value)}
+        onFocus={e => { try { e.target.select(); } catch {} setTimeout(() => { try { e.target.select(); } catch {} }, 0); }}
         style={inputStyle}
       />
       <input
@@ -1553,26 +2138,27 @@ function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
         value={set.reps}
         placeholder={prev && prev.reps !== undefined ? String(prev.reps) : "—"}
         onChange={e => onChange("reps", e.target.value)}
+        onFocus={e => { try { e.target.select(); } catch {} setTimeout(() => { try { e.target.select(); } catch {} }, 0); }}
         style={inputStyle}
       />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
-        <button onClick={onRemove} className="btn" style={{ color: c.text4, padding: 3 }}>
-          <Minus size={13} />
+        <button onClick={onRemove} className="btn" style={{ color: c.text4, padding: 4 }}>
+          <Minus size={15} />
         </button>
         <button
           onClick={onToggle}
           disabled={!ready && !set.done}
           className="btn"
           style={{
-            width: 26, height: 26, borderRadius: "50%",
+            width: 30, height: 30, borderRadius: "50%",
             display: "flex", alignItems: "center", justifyContent: "center",
             background: set.done ? dayColor : "transparent",
-            border: `1.5px solid ${set.done ? dayColor : (ready ? c.text2 : c.border)}`,
+            border: `2px solid ${set.done ? dayColor : (ready ? c.text2 : c.border)}`,
             opacity: !ready && !set.done ? 0.4 : 1,
             flexShrink: 0,
           }}
         >
-          {set.done ? <Check size={13} strokeWidth={3} color="#fff" /> : null}
+          {set.done ? <Check size={15} strokeWidth={3} color="#fff" /> : null}
         </button>
       </div>
     </div>
@@ -1597,26 +2183,26 @@ function HistoryScreen({ history, onOpen }) {
 
   return (
     <div className="slide-up">
-      <div style={{ padding: "44px 20px 12px" }}>
-        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: c.text, letterSpacing: "-0.025em" }}>History</h1>
-        <p style={{ margin: "4px 0 0", fontSize: 13, color: c.text3 }}>
+      <div style={{ padding: "36px 20px 14px" }}>
+        <h1 className="display" style={{ margin: 0, fontSize: 38, fontWeight: 600, color: c.text, letterSpacing: "-0.02em" }}>History</h1>
+        <p style={{ margin: "5px 0 0", fontSize: 15, color: c.text3 }}>
           {history.length} session{history.length !== 1 ? "s" : ""} completed
         </p>
       </div>
       <div style={{ padding: "0 20px 24px" }}>
         {!history.length ? (
           <EmptyState
-            icon={<ClipboardList size={24} color={c.text4} />}
+            icon={<ClipboardList size={20} color={c.primary} strokeWidth={1.8} />}
             title="No workouts yet"
             sub="Start a session from Today to begin tracking."
           />
         ) : (
           grouped.map((g, gi) => (
-            <div key={gi} style={{ marginBottom: 20 }}>
+            <div key={gi} style={{ marginBottom: 22 }}>
               <p style={{
                 margin: "0 0 8px 4px",
-                fontSize: 11, fontWeight: 600,
-                color: c.text3, letterSpacing: "0.02em",
+                fontSize: 12, fontWeight: 600,
+                color: c.text3, letterSpacing: "0.04em",
                 textTransform: "uppercase",
               }}>{g.label}</p>
               <Card padded={false}>
@@ -1632,38 +2218,38 @@ function HistoryScreen({ history, onOpen }) {
                         display: "flex",
                         alignItems: "center",
                         gap: 12,
-                        padding: "13px 16px",
+                        padding: "15px 16px",
                         textAlign: "left",
                         background: "transparent",
                         borderTop: i === 0 ? "none" : `0.5px solid ${c.borderSoft}`,
                       }}
                     >
                       <div style={{
-                        width: 3, height: 32, borderRadius: 2,
+                        width: 3, height: 36, borderRadius: 2,
                         background: day ? day.color : c.text4,
                         flexShrink: 0,
                       }} />
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>
+                        <p style={{ margin: 0, fontSize: 16, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>
                           {day ? day.label : "Workout"}
                         </p>
-                        <p style={{ margin: "1px 0 0", fontSize: 12, color: c.text3 }}>{fmtLong(w.startedAt)}</p>
+                        <p style={{ margin: "2px 0 0", fontSize: 13, color: c.text3 }}>{fmtLong(w.startedAt)}</p>
                       </div>
                       <div style={{ textAlign: "right", flexShrink: 0 }}>
                         <p style={{
                           margin: 0,
                           fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                          fontSize: 12, fontWeight: 600, color: c.text,
+                          fontSize: 14, fontWeight: 600, color: c.text,
                         }}>
-                          {fmtNum(workoutVolume(w))}<span style={{ fontSize: 10, color: c.text3, marginLeft: 2 }}>lb</span>
+                          {fmtNum(workoutVolume(w))}<span style={{ fontSize: 11, color: c.text3, marginLeft: 2 }}>lb</span>
                         </p>
                         <p style={{
-                          margin: "1px 0 0",
+                          margin: "2px 0 0",
                           fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                          fontSize: 10, color: c.text3,
+                          fontSize: 11, color: c.text3,
                         }}>{workoutSets(w)} sets</p>
                       </div>
-                      <ChevronRight size={15} color={c.text4} />
+                      <ChevronRight size={17} color={c.text4} />
                     </button>
                   );
                 })}
@@ -1685,31 +2271,31 @@ function DetailScreen({ workout, onBack, onDelete }) {
     <div className="slide-up" style={{ minHeight: "100vh", background: c.bg }}>
       <div style={{
         position: "sticky", top: 0, zIndex: 100,
-        background: "rgba(250, 250, 250, 0.9)",
+        background: "rgba(250, 247, 243, 0.9)",
         backdropFilter: "blur(20px)",
         WebkitBackdropFilter: "blur(20px)",
         borderBottom: `0.5px solid ${c.border}`,
-        padding: "12px 16px",
+        padding: "14px 16px",
       }}>
         <button onClick={onBack} className="btn" style={{
           display: "flex", alignItems: "center",
-          color: c.text, fontSize: 14, fontWeight: 500, gap: 2,
+          color: c.text, fontSize: 16, fontWeight: 500, gap: 2,
         }}>
-          <ChevronLeft size={18} strokeWidth={2} /> History
+          <ChevronLeft size={20} strokeWidth={2} /> History
         </button>
       </div>
-      <div style={{ padding: "20px 20px 48px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-          <div style={{ width: 7, height: 7, borderRadius: "50%", background: day ? day.color : c.text }} />
-          <span style={{ fontSize: 12, fontWeight: 600, color: day ? day.color : c.text, letterSpacing: "0.01em" }}>
+      <div style={{ padding: "22px 20px 48px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: day ? day.color : c.text }} />
+          <span style={{ fontSize: 13, fontWeight: 600, color: day ? day.color : c.text, letterSpacing: "0.04em" }}>
             {day ? day.label.toUpperCase() : ""}
           </span>
         </div>
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: c.text, margin: "0 0 18px", letterSpacing: "-0.025em" }}>
+        <h1 className="display" style={{ fontSize: 28, fontWeight: 600, color: c.text, margin: "0 0 22px", letterSpacing: "-0.02em", lineHeight: 1.1 }}>
           {fmtLong(workout.startedAt)}
         </h1>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 20 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 22 }}>
           <StatTile label="Sets" value={workoutSets(workout)} />
           <StatTile label="Duration" value={fmtDur(workout.completedAt - workout.startedAt)} />
           <StatTile label="Volume" value={fmtNum(workoutVolume(workout))} unit="lb" />
@@ -1724,31 +2310,31 @@ function DetailScreen({ workout, onBack, onDelete }) {
             overflow: "hidden",
             boxShadow: c.shadowSm,
           }}>
-            <div style={{ padding: "12px 16px 8px" }}>
-              <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: c.text }}>{ex.name}</p>
-              <p style={{ margin: "1px 0 0", fontSize: 11, color: c.text3 }}>Target: {ex.targetSets}×{ex.targetReps}</p>
+            <div style={{ padding: "14px 16px 10px" }}>
+              <p style={{ margin: 0, fontSize: 15, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>{ex.name}</p>
+              <p style={{ margin: "2px 0 0", fontSize: 12, color: c.text3 }}>Target: {ex.targetSets}×{ex.targetReps}</p>
             </div>
             <div style={{ borderTop: `0.5px solid ${c.borderSoft}` }}>
               {ex.sets.map((set, j) => (
                 <div key={j} style={{
-                  display: "flex", alignItems: "center", gap: 10,
-                  padding: "8px 16px",
+                  display: "flex", alignItems: "center", gap: 12,
+                  padding: "10px 16px",
                   borderTop: j === 0 ? "none" : `0.5px solid ${c.borderSoft}`,
                 }}>
                   <span style={{
                     fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                    fontSize: 11, fontWeight: 600, width: 16,
+                    fontSize: 13, fontWeight: 600, width: 18,
                     color: set.done ? (day ? day.color : c.green) : c.text3,
                   }}>{j + 1}</span>
                   <span style={{
                     fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                    fontSize: 13, fontWeight: 500, flex: 1, color: c.text,
+                    fontSize: 15, fontWeight: 500, flex: 1, color: c.text,
                   }}>
-                    {set.weight || "—"}<span style={{ fontSize: 10, color: c.text3, marginLeft: 2 }}>lb</span>
+                    {set.weight || "—"}<span style={{ fontSize: 11, color: c.text3, marginLeft: 2 }}>lb</span>
                     <span style={{ color: c.text4, margin: "0 8px" }}>×</span>
-                    {set.reps || "—"}<span style={{ fontSize: 10, color: c.text3, marginLeft: 2 }}>reps</span>
+                    {set.reps || "—"}<span style={{ fontSize: 11, color: c.text3, marginLeft: 2 }}>reps</span>
                   </span>
-                  {set.done ? <Check size={12} color={day ? day.color : c.green} strokeWidth={2.5} /> : null}
+                  {set.done ? <Check size={14} color={day ? day.color : c.green} strokeWidth={2.5} /> : null}
                 </div>
               ))}
             </div>
@@ -1759,15 +2345,15 @@ function DetailScreen({ workout, onBack, onDelete }) {
           onClick={() => onDelete(workout.id)}
           className="btn"
           style={{
-            width: "100%", marginTop: 8, padding: "13px 0",
+            width: "100%", marginTop: 10, padding: "15px 0",
             borderRadius: 12,
             background: c.card,
             border: `1px solid ${c.border}`,
-            color: c.red, fontWeight: 500, fontSize: 14,
+            color: c.red, fontWeight: 500, fontSize: 15,
             display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
           }}
         >
-          <Trash2 size={14} /> Delete workout
+          <Trash2 size={15} /> Delete workout
         </button>
       </div>
     </div>
@@ -1782,30 +2368,30 @@ function ProgressScreen({ history, onExport }) {
 
   return (
     <div className="slide-up">
-      <div style={{ padding: "44px 20px 12px", display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, color: c.text, letterSpacing: "-0.025em" }}>Progress</h1>
+      <div style={{ padding: "36px 20px 14px", display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+        <h1 className="display" style={{ margin: 0, fontSize: 38, fontWeight: 600, color: c.text, letterSpacing: "-0.02em" }}>Progress</h1>
         <button
           onClick={onExport}
           disabled={!history.length}
           className="btn"
           style={{
-            display: "flex", alignItems: "center", gap: 5,
-            padding: "6px 12px", borderRadius: 8,
-            fontSize: 12, fontWeight: 500,
+            display: "flex", alignItems: "center", gap: 6,
+            padding: "8px 14px", borderRadius: 9,
+            fontSize: 13, fontWeight: 500,
             color: history.length ? c.text : c.text4,
             background: c.card,
             border: `1px solid ${c.border}`,
             boxShadow: c.shadowSm,
           }}
         >
-          <Download size={12} /> Export
+          <Download size={14} /> Export
         </button>
       </div>
       <div style={{ padding: "12px 20px 16px" }}>
         <div style={{
           background: c.panel,
           border: `1px solid ${c.border}`,
-          borderRadius: 9,
+          borderRadius: 10,
           padding: 3,
           display: "flex",
         }}>
@@ -1816,9 +2402,9 @@ function ProgressScreen({ history, onExport }) {
               className="btn"
               style={{
                 flex: 1,
-                padding: "7px 0",
-                borderRadius: 6,
-                fontSize: 13,
+                padding: "9px 0",
+                borderRadius: 7,
+                fontSize: 14,
                 fontWeight: 500,
                 background: view === k ? c.card : "transparent",
                 color: view === k ? c.text : c.text3,
@@ -1855,7 +2441,7 @@ function OverviewView({ history }) {
     return (
       <div style={{ padding: "0 20px" }}>
         <EmptyState
-          icon={<BarChart3 size={24} color={c.text4} />}
+          icon={<BarChart3 size={20} color={c.primary} strokeWidth={1.8} />}
           title="No data yet"
           sub="Complete your first workout to see trends."
         />
@@ -1913,13 +2499,13 @@ function OverviewView({ history }) {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
             {byDay.map(d => (
               <div key={d.id}>
-                <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
-                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: d.color }} />
-                  <span style={{ fontSize: 11, fontWeight: 500, color: c.text3 }}>{d.label}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <div style={{ width: 7, height: 7, borderRadius: "50%", background: d.color }} />
+                  <span style={{ fontSize: 13, fontWeight: 500, color: c.text3 }}>{d.label}</span>
                 </div>
                 <span style={{
                   fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                  fontSize: 19, fontWeight: 600, color: c.text,
+                  fontSize: 22, fontWeight: 600, color: c.text,
                 }}>{d.count}</span>
               </div>
             ))}
@@ -1933,11 +2519,11 @@ function OverviewView({ history }) {
             {improvements.map((imp, i) => (
               <div key={i} style={{
                 display: "flex", alignItems: "center", gap: 12,
-                padding: "11px 14px",
+                padding: "13px 16px",
                 borderTop: i === 0 ? "none" : `0.5px solid ${c.borderSoft}`,
               }}>
                 <div style={{
-                  width: 32, height: 32, borderRadius: 8,
+                  width: 38, height: 38, borderRadius: 9,
                   background: `${c.green}14`,
                   border: `1px solid ${c.green}30`,
                   display: "flex", alignItems: "center", justifyContent: "center",
@@ -1945,20 +2531,20 @@ function OverviewView({ history }) {
                 }}>
                   <span style={{
                     fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                    fontSize: 11, fontWeight: 600, color: c.green,
+                    fontSize: 13, fontWeight: 600, color: c.green,
                   }}>+{imp.delta}</span>
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <p style={{
-                    margin: 0, fontSize: 13, fontWeight: 500, color: c.text,
+                    margin: 0, fontSize: 15, fontWeight: 500, color: c.text,
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                   }}>{imp.name}</p>
                   <p style={{
-                    margin: "1px 0 0", fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                    fontSize: 11, color: c.text3,
+                    margin: "2px 0 0", fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                    fontSize: 12, color: c.text3,
                   }}>{imp.first} → {imp.last} lb</p>
                 </div>
-                <TrendingUp size={12} color={c.green} />
+                <TrendingUp size={14} color={c.green} />
               </div>
             ))}
           </Card>
@@ -1971,25 +2557,25 @@ function OverviewView({ history }) {
             {prs.sort((a, b) => b.top - a.top).slice(0, 8).map((pr, i) => (
               <div key={i} style={{
                 display: "flex", alignItems: "center", gap: 12,
-                padding: "11px 14px",
+                padding: "13px 16px",
                 borderTop: i === 0 ? "none" : `0.5px solid ${c.borderSoft}`,
               }}>
-                <Trophy size={13} color={c.orange} style={{ flexShrink: 0 }} />
+                <Trophy size={15} color={c.orange} style={{ flexShrink: 0 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <p style={{
-                    margin: 0, fontSize: 13, fontWeight: 500, color: c.text,
+                    margin: 0, fontSize: 15, fontWeight: 500, color: c.text,
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                   }}>{pr.name}</p>
-                  <p style={{ margin: "1px 0 0", fontSize: 11, color: c.text3 }}>{timeAgo(pr.date)}</p>
+                  <p style={{ margin: "2px 0 0", fontSize: 12, color: c.text3 }}>{timeAgo(pr.date)}</p>
                 </div>
                 <div style={{ textAlign: "right", flexShrink: 0 }}>
                   <p style={{
                     margin: 0, fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                    fontSize: 13, fontWeight: 600, color: c.text,
-                  }}>{pr.top}<span style={{ fontSize: 10, color: c.text3, marginLeft: 2 }}>lb</span></p>
+                    fontSize: 15, fontWeight: 600, color: c.text,
+                  }}>{pr.top}<span style={{ fontSize: 11, color: c.text3, marginLeft: 2 }}>lb</span></p>
                   <p style={{
-                    margin: 0, fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                    fontSize: 10, color: c.text3,
+                    margin: "2px 0 0", fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                    fontSize: 11, color: c.text3,
                   }}>{pr.reps} reps</p>
                 </div>
               </div>
@@ -2010,9 +2596,9 @@ function ExerciseView({ history }) {
   return (
     <div style={{ paddingBottom: 24 }}>
       <div style={{ padding: "0 20px 14px" }}>
-        <Card style={{ padding: "12px 14px" }}>
+        <Card style={{ padding: "14px 16px" }}>
           <p style={{
-            margin: "0 0 4px", fontSize: 10, fontWeight: 500,
+            margin: "0 0 6px", fontSize: 11, fontWeight: 500,
             letterSpacing: "0.04em", color: c.text3, textTransform: "uppercase",
           }}>Exercise</p>
           <select
@@ -2023,14 +2609,14 @@ function ExerciseView({ history }) {
               background: "transparent",
               color: c.text,
               fontWeight: 600,
-              fontSize: 15,
+              fontSize: 17,
               border: "none",
               outline: "none",
               letterSpacing: "-0.005em",
               backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2371717A'/%3E%3C/svg%3E")`,
               backgroundRepeat: "no-repeat",
               backgroundPosition: "right 0 center",
-              paddingRight: 18,
+              paddingRight: 20,
             }}
           >
             {DAYS.map(d => (
@@ -2051,7 +2637,7 @@ function ExerciseView({ history }) {
       {!series.length ? (
         <div style={{ padding: "0 20px" }}>
           <EmptyState
-            icon={<Activity size={24} color={c.text4} />}
+            icon={<Activity size={20} color={c.primary} strokeWidth={1.8} />}
             title="No data yet"
             sub="Log a set for this exercise to see your trend."
           />
@@ -2059,31 +2645,31 @@ function ExerciseView({ history }) {
       ) : (
         <>
           <Section title="Top weight">
-            <AreaCard data={series} field="top" color={c.text} unit="lb" height={160} />
+            <AreaCard data={series} field="top" color={c.text} unit="lb" height={170} />
           </Section>
           <Section title="Volume" sub="weight × reps">
-            <AreaCard data={series} field="vol" color={c.orange} unit="lb" height={140} tf={fmtNum} />
+            <AreaCard data={series} field="vol" color={c.orange} unit="lb" height={150} tf={fmtNum} />
           </Section>
           <Section title="Sessions">
             <Card padded={false}>
               {[...series].reverse().slice(0, 10).map((r, i) => (
                 <div key={i} style={{
                   display: "flex", justifyContent: "space-between", alignItems: "center",
-                  padding: "10px 14px",
+                  padding: "12px 16px",
                   borderTop: i === 0 ? "none" : `0.5px solid ${c.borderSoft}`,
                 }}>
-                  <span style={{ fontSize: 12, color: c.text2, fontWeight: 500 }}>
+                  <span style={{ fontSize: 14, color: c.text2, fontWeight: 500 }}>
                     {new Date(r.date).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
                   </span>
                   <span style={{
                     fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                    fontSize: 12, fontWeight: 600, color: c.text,
+                    fontSize: 14, fontWeight: 600, color: c.text,
                   }}>
                     <span style={{ color: c.text }}>{r.top}</span>
-                    <span style={{ fontSize: 10, color: c.text3, marginLeft: 2 }}>lb</span>
+                    <span style={{ fontSize: 11, color: c.text3, marginLeft: 2 }}>lb</span>
                     <span style={{ color: c.text4, margin: "0 6px" }}>×</span>
                     {r.topReps}
-                    <span style={{ fontSize: 10, color: c.text3, marginLeft: 2 }}>reps</span>
+                    <span style={{ fontSize: 11, color: c.text3, marginLeft: 2 }}>reps</span>
                   </span>
                 </div>
               ))}
@@ -2100,17 +2686,17 @@ function ExerciseView({ history }) {
 // ═══════════════════════════════════════════════════════════════════════════
 function Section({ title, sub, children }) {
   return (
-    <div style={{ padding: "0 20px 16px" }}>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 8 }}>
-        <p style={{ margin: 0, fontSize: 12, fontWeight: 600, color: c.text3, letterSpacing: "0.04em", textTransform: "uppercase" }}>{title}</p>
-        {sub ? <span style={{ fontSize: 11, color: c.text3 }}>{sub}</span> : null}
+    <div style={{ padding: "0 20px 18px" }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
+        <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: c.text3, letterSpacing: "0.04em", textTransform: "uppercase" }}>{title}</p>
+        {sub ? <span style={{ fontSize: 12, color: c.text3 }}>{sub}</span> : null}
       </div>
       {children}
     </div>
   );
 }
 
-function AreaCard({ data, field, color, unit, height = 150, tf }) {
+function AreaCard({ data, field, color, unit, height = 160, tf }) {
   const gid = `grad_${field}_${color.replace("#", "")}`;
   const xKey = data[0] && data[0].label !== undefined ? "label" : "wk";
   return (
@@ -2124,10 +2710,10 @@ function AreaCard({ data, field, color, unit, height = 150, tf }) {
             </linearGradient>
           </defs>
           <CartesianGrid stroke={c.borderSoft} vertical={false} />
-          <XAxis dataKey={xKey} tick={{ fill: c.text3, fontSize: 9, fontFamily: "'JetBrains Mono', ui-monospace, monospace" }} axisLine={false} tickLine={false} />
-          <YAxis tick={{ fill: c.text3, fontSize: 9, fontFamily: "'JetBrains Mono', ui-monospace, monospace" }} axisLine={false} tickLine={false} width={34} tickFormatter={tf} />
+          <XAxis dataKey={xKey} tick={{ fill: c.text3, fontSize: 10, fontFamily: "'JetBrains Mono', ui-monospace, monospace" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fill: c.text3, fontSize: 10, fontFamily: "'JetBrains Mono', ui-monospace, monospace" }} axisLine={false} tickLine={false} width={36} tickFormatter={tf} />
           <Tooltip content={<CTip field={field} unit={unit} />} cursor={{ stroke: `${color}40`, strokeDasharray: "2 3" }} />
-          <Area type="monotone" dataKey={field} stroke={color} strokeWidth={1.5} fill={`url(#${gid})`} dot={{ fill: color, r: 2.5, strokeWidth: 0 }} activeDot={{ r: 4, strokeWidth: 0 }} />
+          <Area type="monotone" dataKey={field} stroke={color} strokeWidth={1.8} fill={`url(#${gid})`} dot={{ fill: color, r: 3, strokeWidth: 0 }} activeDot={{ r: 5, strokeWidth: 0 }} />
         </AreaChart>
       </ResponsiveContainer>
     </Card>
@@ -2143,18 +2729,18 @@ function CTip({ active, payload, field, unit }) {
       background: "rgba(255,255,255,0.97)",
       backdropFilter: "blur(16px)",
       border: `1px solid ${c.border}`,
-      borderRadius: 8,
-      padding: "7px 10px",
+      borderRadius: 9,
+      padding: "8px 12px",
       boxShadow: c.shadowMd,
     }}>
-      <p style={{ margin: "0 0 2px", fontSize: 10, fontWeight: 500, color: c.text3 }}>{label}</p>
+      <p style={{ margin: "0 0 3px", fontSize: 11, fontWeight: 500, color: c.text3 }}>{label}</p>
       <p style={{
         margin: 0,
         fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-        fontSize: 13, fontWeight: 600, color: c.text,
+        fontSize: 15, fontWeight: 600, color: c.text,
       }}>
         {fmtNum(r[field])}
-        <span style={{ fontSize: 10, color: c.text3, marginLeft: 3 }}>{unit}</span>
+        <span style={{ fontSize: 11, color: c.text3, marginLeft: 3 }}>{unit}</span>
       </p>
     </div>
   );
@@ -2166,13 +2752,30 @@ function EmptyState({ icon, title, sub }) {
       background: c.card,
       border: `1px solid ${c.border}`,
       borderRadius: 12,
-      padding: "36px 20px",
+      padding: "44px 24px",
       textAlign: "center",
       boxShadow: c.shadowSm,
+      position: "relative",
+      overflow: "hidden",
     }}>
-      <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>{icon}</div>
-      <p style={{ margin: 0, fontWeight: 600, fontSize: 14, color: c.text, letterSpacing: "-0.005em" }}>{title}</p>
-      {sub ? <p style={{ margin: "4px 0 0", fontSize: 12, color: c.text3, lineHeight: 1.5 }}>{sub}</p> : null}
+      {/* Decorative line-and-dot flourish */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        gap: 10, marginBottom: 16,
+      }}>
+        <div style={{ height: 1, width: 28, background: c.border }} />
+        <div style={{
+          width: 42, height: 42, borderRadius: "50%",
+          background: `${c.primary}0D`,
+          border: `1px solid ${c.primary}33`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          {icon}
+        </div>
+        <div style={{ height: 1, width: 28, background: c.border }} />
+      </div>
+      <p className="display" style={{ margin: 0, fontWeight: 600, fontSize: 18, color: c.text, letterSpacing: "-0.01em" }}>{title}</p>
+      {sub ? <p style={{ margin: "8px auto 0", fontSize: 14, color: c.text3, lineHeight: 1.5, maxWidth: 280 }}>{sub}</p> : null}
     </div>
   );
 }
