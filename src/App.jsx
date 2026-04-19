@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import {
   ChevronLeft, ChevronRight, ChevronDown, Plus, Check, Minus,
   TrendingUp, Activity, BarChart3, ClipboardList,
-  Trophy, Download, Play, Trash2, X,
+  Trophy, Download, Upload, Play, Trash2, X, Sun, Moon, Shield,
 } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, Cell,
@@ -539,6 +539,89 @@ function exportToExcel(workouts) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// BACKUP / RESTORE — JSON dump & load (device-local safety net)
+// ═══════════════════════════════════════════════════════════════════════════
+const KEY_LAST_BACKUP = "last_backup_at";
+const BACKUP_VERSION = 1;
+
+function exportBackup(workouts) {
+  const toDate = ts => new Date(ts).toISOString().slice(0, 10);
+  const payload = {
+    version: BACKUP_VERSION,
+    exportedAt: Date.now(),
+    workouts,
+  };
+  const json = JSON.stringify(payload, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `tac-backup-${toDate(Date.now())}.json`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  // Record backup timestamp so the reminder banner clears
+  try { localStorage.setItem(KEY_LAST_BACKUP, String(Date.now())); } catch {}
+}
+
+// Validate that a parsed backup is structurally sound
+function validateBackup(parsed) {
+  if (!parsed || typeof parsed !== "object") return false;
+  if (!Array.isArray(parsed.workouts)) return false;
+  // Each workout needs id, dayId, startedAt, exercises array
+  for (const w of parsed.workouts) {
+    if (!w || typeof w !== "object") return false;
+    if (typeof w.id !== "string") return false;
+    if (typeof w.dayId !== "string") return false;
+    if (typeof w.startedAt !== "number") return false;
+    if (!Array.isArray(w.exercises)) return false;
+    for (const ex of w.exercises) {
+      if (!ex || typeof ex !== "object") return false;
+      if (typeof ex.name !== "string") return false;
+      if (!Array.isArray(ex.sets)) return false;
+    }
+  }
+  return true;
+}
+
+// Replaces all stored workouts with the backup's workouts.
+// Returns the count imported, or null on failure.
+function applyBackup(parsed) {
+  try {
+    // Clear existing workout keys (but leave active_workout alone)
+    const keysToDelete = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(KEY_WO_PREFIX)) keysToDelete.push(k);
+    }
+    for (const k of keysToDelete) localStorage.removeItem(k);
+    // Write each workout in
+    for (const w of parsed.workouts) {
+      localStorage.setItem(KEY_WO_PREFIX + w.id, JSON.stringify(w));
+    }
+    localStorage.setItem(KEY_LAST_BACKUP, String(Date.now()));
+    return parsed.workouts.length;
+  } catch (e) {
+    console.error("[applyBackup]", e);
+    return null;
+  }
+}
+
+// Days since last backup — returns Infinity if never backed up
+function daysSinceBackup() {
+  try {
+    const raw = localStorage.getItem(KEY_LAST_BACKUP);
+    if (!raw) return Infinity;
+    const ts = Number(raw);
+    if (!ts) return Infinity;
+    return Math.floor((Date.now() - ts) / 86400000);
+  } catch {
+    return Infinity;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ACTION SHEET
 // ═══════════════════════════════════════════════════════════════════════════
 function ActionSheet({ title, message, actions, onDismiss }) {
@@ -830,6 +913,63 @@ export default function App() {
     });
   }
 
+  function handleRestore(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      let parsed;
+      try { parsed = JSON.parse(ev.target.result); }
+      catch {
+        showSheet({
+          title: "Invalid backup file",
+          message: "This file isn't a valid TAC backup. Make sure you're importing a .json file that was previously exported from this app.",
+          actions: [{ label: "OK", variant: "cancel", fn: closeSheet }],
+        });
+        return;
+      }
+      if (!validateBackup(parsed)) {
+        showSheet({
+          title: "Backup looks malformed",
+          message: "The file parsed but doesn't match the expected structure. Import cancelled — your existing data is untouched.",
+          actions: [{ label: "OK", variant: "cancel", fn: closeSheet }],
+        });
+        return;
+      }
+      const count = parsed.workouts.length;
+      const existingCount = history.length;
+      showSheet({
+        title: "Restore from backup?",
+        message: `This will replace all ${existingCount} current workout${existingCount === 1 ? "" : "s"} with the ${count} in the backup. Your current data will be overwritten.`,
+        actions: [
+          { label: `Replace with ${count} workouts`, variant: "danger", fn: async () => {
+            closeSheet();
+            const n = applyBackup(parsed);
+            if (n === null) {
+              showSheet({
+                title: "Restore failed",
+                message: "Something went wrong writing to storage. Your data is unchanged.",
+                actions: [{ label: "OK", variant: "cancel", fn: closeSheet }],
+              });
+              return;
+            }
+            // Reload history from storage
+            const { workouts } = await loadAllFromStorage();
+            setHistory(workouts);
+          }},
+          { label: "Cancel", variant: "cancel", fn: closeSheet },
+        ],
+      });
+    };
+    reader.onerror = () => {
+      showSheet({
+        title: "Couldn't read file",
+        message: "The file couldn't be opened.",
+        actions: [{ label: "OK", variant: "cancel", fn: closeSheet }],
+      });
+    };
+    reader.readAsText(file);
+  }
+
   if (loading) {
     return (
       <div style={{
@@ -867,6 +1007,8 @@ export default function App() {
           <ProgressScreen
             history={history}
             onExport={() => exportToExcel(history)}
+            onBackup={() => exportBackup(history)}
+            onRestore={file => handleRestore(file)}
           />
         ) : null}
         {screen === "workout" && active ? (
@@ -1379,11 +1521,60 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
   const [expanded, setExpanded] = useState({});  // all collapsed by default
   const [swiped, setSwiped] = useState(null);    // index of exercise swiped open
   const [addingExercise, setAddingExercise] = useState(false);
+  const [wakeOn, setWakeOn] = useState(false);
+  const wakeLockRef = useRef(null);
 
   useEffect(() => {
     const t = setInterval(() => setElapsed(Date.now() - workout.startedAt), 30000);
     return () => clearInterval(t);
   }, [workout.startedAt]);
+
+  // Wake Lock lifecycle — release the lock when the screen unmounts (workout finished/discarded)
+  useEffect(() => {
+    return () => {
+      if (wakeLockRef.current) {
+        try { wakeLockRef.current.release(); } catch {}
+        wakeLockRef.current = null;
+      }
+    };
+  }, []);
+
+  // Re-acquire wake lock after tab visibility change (browsers auto-release it)
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === "visible" && wakeOn && !wakeLockRef.current) {
+        requestWakeLock();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [wakeOn]);
+
+  async function requestWakeLock() {
+    try {
+      if (!("wakeLock" in navigator)) return false;
+      wakeLockRef.current = await navigator.wakeLock.request("screen");
+      wakeLockRef.current.addEventListener("release", () => {
+        wakeLockRef.current = null;
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function toggleWake() {
+    if (wakeOn) {
+      if (wakeLockRef.current) {
+        try { await wakeLockRef.current.release(); } catch {}
+        wakeLockRef.current = null;
+      }
+      setWakeOn(false);
+    } else {
+      const ok = await requestWakeLock();
+      setWakeOn(ok);
+    }
+  }
 
   const totalSets = workout.exercises.reduce((s, ex) => s + ex.sets.length, 0);
   const doneSets = workout.exercises.reduce((s, ex) => s + ex.sets.filter(x => x.done).length, 0);
@@ -1482,8 +1673,25 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
               {fmtDur(elapsed)} · {doneSets}/{totalSets} sets
             </p>
           </div>
+          <button
+            onClick={toggleWake}
+            className="btn"
+            aria-label={wakeOn ? "Turn off keep-awake" : "Keep screen awake"}
+            title={wakeOn ? "Screen stays awake" : "Keep screen awake"}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 34, height: 34, borderRadius: 8,
+              background: wakeOn ? `${c.primary}14` : "transparent",
+              border: `1px solid ${wakeOn ? `${c.primary}40` : c.border}`,
+              color: wakeOn ? c.primary : c.text3,
+              flexShrink: 0,
+              marginRight: 4,
+            }}
+          >
+            {wakeOn ? <Sun size={16} strokeWidth={2.2} /> : <Moon size={16} strokeWidth={2} />}
+          </button>
           <button onClick={onDiscard} className="btn" style={{
-            color: c.red, fontWeight: 500, fontSize: 15, flexShrink: 0,
+            color: c.danger, fontWeight: 500, fontSize: 15, flexShrink: 0,
           }}>Discard</button>
         </div>
         <div style={{ height: 2, background: c.borderSoft }}>
@@ -1821,7 +2029,7 @@ function ExerciseCard({
             ) : null}
             <div style={{
               display: "grid",
-              gridTemplateColumns: "32px 1fr 1fr 60px",
+              gridTemplateColumns: "32px 1fr 1fr 70px",
               gap: 8,
               padding: "9px 16px 5px",
               fontSize: 11,
@@ -2098,6 +2306,16 @@ function AddExerciseForm({ onAdd, onCancel }) {
 
 function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
   const ready = set.weight !== "" && set.reps !== "";
+  // iOS Safari will position the cursor on tap rather than select-all.
+  // Belt-and-suspenders: select on focus (sync + async) AND on pointer-up.
+  const selectAll = e => {
+    const el = e.currentTarget;
+    try { el.select(); } catch {}
+    // Some iOS versions clobber selection after focus — re-apply next tick.
+    setTimeout(() => { try { el.select(); } catch {} }, 0);
+    // And once more after the pointer event settles.
+    setTimeout(() => { try { el.select(); } catch {} }, 50);
+  };
   const inputStyle = {
     borderRadius: 8,
     padding: "9px 4px",
@@ -2112,7 +2330,7 @@ function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
   return (
     <div style={{
       display: "grid",
-      gridTemplateColumns: "32px 1fr 1fr 60px",
+      gridTemplateColumns: "32px 1fr 1fr 70px",
       gap: 8,
       padding: "7px 16px",
       alignItems: "center",
@@ -2129,7 +2347,8 @@ function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
         value={set.weight}
         placeholder={prev && prev.weight !== undefined ? String(prev.weight) : "—"}
         onChange={e => onChange("weight", e.target.value)}
-        onFocus={e => { try { e.target.select(); } catch {} setTimeout(() => { try { e.target.select(); } catch {} }, 0); }}
+        onFocus={selectAll}
+        onPointerUp={selectAll}
         style={inputStyle}
       />
       <input
@@ -2138,19 +2357,20 @@ function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
         value={set.reps}
         placeholder={prev && prev.reps !== undefined ? String(prev.reps) : "—"}
         onChange={e => onChange("reps", e.target.value)}
-        onFocus={e => { try { e.target.select(); } catch {} setTimeout(() => { try { e.target.select(); } catch {} }, 0); }}
+        onFocus={selectAll}
+        onPointerUp={selectAll}
         style={inputStyle}
       />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
-        <button onClick={onRemove} className="btn" style={{ color: c.text4, padding: 4 }}>
-          <Minus size={15} />
+        <button onClick={onRemove} className="btn" style={{ color: c.text4, padding: 6 }}>
+          <Minus size={16} />
         </button>
         <button
           onClick={onToggle}
           disabled={!ready && !set.done}
           className="btn"
           style={{
-            width: 30, height: 30, borderRadius: "50%",
+            width: 36, height: 36, borderRadius: "50%",
             display: "flex", alignItems: "center", justifyContent: "center",
             background: set.done ? dayColor : "transparent",
             border: `2px solid ${set.done ? dayColor : (ready ? c.text2 : c.border)}`,
@@ -2158,7 +2378,7 @@ function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
             flexShrink: 0,
           }}
         >
-          {set.done ? <Check size={15} strokeWidth={3} color="#fff" /> : null}
+          {set.done ? <Check size={17} strokeWidth={3} color="#fff" /> : null}
         </button>
       </div>
     </div>
@@ -2363,8 +2583,19 @@ function DetailScreen({ workout, onBack, onDelete }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // PROGRESS SCREEN
 // ═══════════════════════════════════════════════════════════════════════════
-function ProgressScreen({ history, onExport }) {
+function ProgressScreen({ history, onExport, onBackup, onRestore }) {
   const [view, setView] = useState("overview");
+  const [backupBannerDismissed, setBackupBannerDismissed] = useState(false);
+  const restoreInputRef = useRef(null);
+  const daysSince = daysSinceBackup();
+  const showBackupBanner = !backupBannerDismissed && history.length >= 3 && daysSince >= 30;
+
+  function handleFilePick(e) {
+    const f = e.target.files && e.target.files[0];
+    if (f && onRestore) onRestore(f);
+    // Reset so the same file can be picked again
+    e.target.value = "";
+  }
 
   return (
     <div className="slide-up">
@@ -2384,10 +2615,56 @@ function ProgressScreen({ history, onExport }) {
             boxShadow: c.shadowSm,
           }}
         >
-          <Download size={14} /> Export
+          <Download size={14} /> Excel
         </button>
       </div>
-      <div style={{ padding: "12px 20px 16px" }}>
+
+      {/* Backup reminder banner — shows after 30 days since last backup */}
+      {showBackupBanner ? (
+        <div style={{ padding: "0 20px 10px" }}>
+          <div style={{
+            background: `${c.accent}12`,
+            border: `1px solid ${c.accent}40`,
+            borderRadius: 10,
+            padding: "11px 13px",
+            display: "flex", alignItems: "center", gap: 11,
+          }}>
+            <Shield size={17} color={c.accent} strokeWidth={2} style={{ flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>
+                {daysSince === Infinity ? "Back up your data" : "Time to back up"}
+              </div>
+              <div style={{ fontSize: 12, color: c.text3, marginTop: 1 }}>
+                {daysSince === Infinity
+                  ? "Save a copy so you don't lose your history if the browser clears its cache."
+                  : `Last backup was ${daysSince} days ago.`}
+              </div>
+            </div>
+            <button
+              onClick={() => { onBackup && onBackup(); }}
+              className="btn"
+              style={{
+                padding: "7px 12px", borderRadius: 7,
+                background: c.accent, color: "#fff",
+                fontSize: 13, fontWeight: 600,
+                flexShrink: 0,
+              }}
+            >
+              Back up
+            </button>
+            <button
+              onClick={() => setBackupBannerDismissed(true)}
+              className="btn"
+              aria-label="Dismiss"
+              style={{ padding: 3, color: c.text3, flexShrink: 0 }}
+            >
+              <X size={15} />
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div style={{ padding: "2px 20px 16px" }}>
         <div style={{
           background: c.panel,
           border: `1px solid ${c.border}`,
@@ -2416,6 +2693,62 @@ function ProgressScreen({ history, onExport }) {
         </div>
       </div>
       {view === "overview" ? <OverviewView history={history} /> : <ExerciseView history={history} />}
+
+      {/* Backup / Restore footer — always available, quieter than the banner */}
+      <div style={{ padding: "4px 20px 12px" }}>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "14px 16px",
+          background: c.card,
+          border: `1px solid ${c.border}`,
+          borderRadius: 12,
+          boxShadow: c.shadowSm,
+        }}>
+          <Shield size={16} color={c.text3} strokeWidth={2} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: c.text, letterSpacing: "-0.005em" }}>Backup</div>
+            <div style={{ fontSize: 11, color: c.text3, marginTop: 1 }}>
+              {daysSince === Infinity ? "Never backed up" : daysSince === 0 ? "Backed up today" : `Last: ${daysSince}d ago`}
+            </div>
+          </div>
+          <button
+            onClick={() => onBackup && onBackup()}
+            disabled={!history.length}
+            className="btn"
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "8px 12px", borderRadius: 8,
+              fontSize: 12, fontWeight: 500,
+              color: history.length ? c.text : c.text4,
+              background: c.panel,
+              border: `1px solid ${c.border}`,
+            }}
+          >
+            <Download size={12} /> Save
+          </button>
+          <button
+            onClick={() => restoreInputRef.current && restoreInputRef.current.click()}
+            className="btn"
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "8px 12px", borderRadius: 8,
+              fontSize: 12, fontWeight: 500,
+              color: c.text,
+              background: c.panel,
+              border: `1px solid ${c.border}`,
+            }}
+          >
+            <Upload size={12} /> Restore
+          </button>
+          <input
+            ref={restoreInputRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: "none" }}
+            onChange={handleFilePick}
+          />
+        </div>
+      </div>
     </div>
   );
 }
