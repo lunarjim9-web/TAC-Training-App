@@ -1905,7 +1905,7 @@ function ExerciseCard({
 
   return (
     <div style={{ position: "relative", marginBottom: 10, borderRadius: 12, overflow: "hidden" }}>
-      {/* Red delete action, revealed behind */}
+      {/* Red delete action, revealed behind the card as it slides left */}
       <div style={{
         position: "absolute", inset: 0,
         background: c.danger, display: "flex",
@@ -1930,7 +1930,8 @@ function ExerciseCard({
         </button>
       </div>
 
-      {/* Card itself — translates on swipe */}
+      {/* Card itself — translates on swipe. Uses an OPAQUE background so the
+          delete panel behind it doesn't bleed through in completed state. */}
       <div
         ref={cardRef}
         onTouchStart={handleTouchStart}
@@ -1939,8 +1940,8 @@ function ExerciseCard({
         onTouchCancel={handleTouchEnd}
         style={{
           position: "relative",
-          background: isComplete ? `${c.primary}08` : c.card,
-          border: `1px solid ${isComplete ? `${c.primary}33` : c.border}`,
+          background: isComplete ? "#FCF5EF" : c.card,
+          border: `1px solid ${isComplete ? "#E8D4C2" : c.border}`,
           borderRadius: 12,
           overflow: "hidden",
           boxShadow: c.shadowSm,
