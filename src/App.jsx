@@ -198,9 +198,31 @@ function GlobalCSS() {
       @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
       @keyframes pulseGlow { 0%, 100% { box-shadow: 0 2px 8px rgba(180,83,42,0.25); } 50% { box-shadow: 0 4px 16px rgba(180,83,42,0.45); } }
       @keyframes completionScale { 0% { transform: scale(1); } 40% { transform: scale(1.04); } 100% { transform: scale(1); } }
+      @keyframes setLock {
+        0%   { transform: translateX(0) scale(1); }
+        35%  { transform: translateX(0) scale(0.985); }
+        100% { transform: translateX(0) scale(1); }
+      }
+      @keyframes checkPop {
+        0%   { transform: scale(0.6); opacity: 0; }
+        55%  { transform: scale(1.15); opacity: 1; }
+        100% { transform: scale(1); opacity: 1; }
+      }
+      @keyframes slideInRight {
+        from { opacity: 0; transform: translateX(16px); }
+        to   { opacity: 1; transform: translateX(0); }
+      }
+      @keyframes slideOutLeft {
+        from { opacity: 1; transform: translateX(0); }
+        to   { opacity: 0; transform: translateX(-16px); }
+      }
       .slide-up { animation: slideUp 180ms cubic-bezier(0.16, 1, 0.3, 1) both; }
       .fade-in { animation: fadeIn 140ms ease both; }
       .pulse-ready { animation: pulseGlow 2s ease-in-out infinite; }
+      .set-lock { animation: setLock 260ms cubic-bezier(0.16, 1, 0.3, 1); }
+      .check-pop { animation: checkPop 280ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+      .slide-in-right { animation: slideInRight 220ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+      .slide-out-left { animation: slideOutLeft 180ms cubic-bezier(0.5, 0, 0.75, 0) both; }
       .hover-bg:hover { background: ${c.panel}; }
     `}</style>
   );
@@ -1650,7 +1672,7 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: c.bg }}>
+    <div className="slide-in-right" style={{ minHeight: "100vh", background: c.bg }}>
       <div style={{
         position: "sticky", top: 0, zIndex: 100,
         background: "rgba(250, 247, 243, 0.9)",
@@ -1807,9 +1829,17 @@ function WorkoutScreen({ workout, history, onUpdate, onFinish, onDiscard, onDele
             {/* Content on top */}
             <span style={{
               position: "relative", zIndex: 1,
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
             }}>
               <Check size={19} strokeWidth={2.5} /> Finish workout
+              {totalSets > 0 ? (
+                <span style={{
+                  fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                  fontSize: 13, fontWeight: 500,
+                  opacity: 0.7,
+                  letterSpacing: "0.02em",
+                }}>{doneSets}/{totalSets}</span>
+              ) : null}
             </span>
           </button>
         </div>
@@ -2307,6 +2337,21 @@ function AddExerciseForm({ onAdd, onCancel }) {
 
 function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
   const ready = set.weight !== "" && set.reps !== "";
+  // Track done-state transitions to trigger the lock-in animation exactly once
+  // per true-transition (false→true). Storing the previous value in a ref so
+  // we don't replay the animation on unrelated re-renders.
+  const prevDoneRef = useRef(set.done);
+  const [justLocked, setJustLocked] = useState(false);
+  useEffect(() => {
+    if (!prevDoneRef.current && set.done) {
+      setJustLocked(true);
+      const t = setTimeout(() => setJustLocked(false), 280);
+      prevDoneRef.current = set.done;
+      return () => clearTimeout(t);
+    }
+    prevDoneRef.current = set.done;
+  }, [set.done]);
+
   // iOS Safari will position the cursor on tap rather than select-all.
   // Belt-and-suspenders: select on focus (sync + async) AND on pointer-up.
   const selectAll = e => {
@@ -2327,20 +2372,25 @@ function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
     border: `1px solid ${set.done ? "transparent" : c.border}`,
     background: set.done ? "transparent" : c.panel,
     color: set.done ? dayColor : c.text,
+    transition: "background 220ms ease, color 220ms ease, border-color 220ms ease",
   };
   return (
-    <div style={{
-      display: "grid",
-      gridTemplateColumns: "32px 1fr 1fr 70px",
-      gap: 8,
-      padding: "7px 16px",
-      alignItems: "center",
-      background: set.done ? `${dayColor}0A` : "transparent",
-    }}>
+    <div
+      className={justLocked ? "set-lock" : ""}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "32px 1fr 1fr 70px",
+        gap: 8,
+        padding: "7px 16px",
+        alignItems: "center",
+        background: set.done ? `${dayColor}0A` : "transparent",
+        transition: "background 260ms ease",
+      }}>
       <span style={{
         fontFamily: "'JetBrains Mono', ui-monospace, monospace",
         fontSize: 14, fontWeight: 600,
         color: set.done ? dayColor : c.text3,
+        transition: "color 220ms ease",
       }}>{idx + 1}</span>
       <input
         type="number"
@@ -2377,9 +2427,14 @@ function SetRow({ set, idx, prev, dayColor, onChange, onToggle, onRemove }) {
             border: `2px solid ${set.done ? dayColor : (ready ? c.text2 : c.border)}`,
             opacity: !ready && !set.done ? 0.4 : 1,
             flexShrink: 0,
+            transition: "background 220ms ease, border-color 220ms ease, opacity 180ms ease",
           }}
         >
-          {set.done ? <Check size={17} strokeWidth={3} color="#fff" /> : null}
+          {set.done ? (
+            <span className={justLocked ? "check-pop" : ""} style={{ display: "inline-flex" }}>
+              <Check size={17} strokeWidth={3} color="#fff" />
+            </span>
+          ) : null}
         </button>
       </div>
     </div>
@@ -2489,7 +2544,7 @@ function HistoryScreen({ history, onOpen }) {
 function DetailScreen({ workout, onBack, onDelete }) {
   const day = findDay(workout.dayId);
   return (
-    <div className="slide-up" style={{ minHeight: "100vh", background: c.bg }}>
+    <div className="slide-in-right" style={{ minHeight: "100vh", background: c.bg }}>
       <div style={{
         position: "sticky", top: 0, zIndex: 100,
         background: "rgba(250, 247, 243, 0.9)",
