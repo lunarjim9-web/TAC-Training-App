@@ -1321,6 +1321,24 @@ function beatTarget(history, day) {
   return null;
 }
 
+// One-line headline for a session: its first lift's best working set
+function shortLiftName(name) {
+  return name.replace(/^(Barbell|Technogym|Dumbbell) /, "").replace(/ \((Dumbbell|Single Arm|Seated)\)$/, "");
+}
+function sessionHeadline(w) {
+  for (const ex of w.exercises || []) {
+    const work = ex.sets.filter(s => s.done && !s.warmup && s.reps !== "");
+    if (!work.length) continue;
+    const bw = exIsBW(ex);
+    const top = work.reduce((b, s) => {
+      const sw = Number(s.weight) || 0, bwt = Number(b.weight) || 0;
+      return sw > bwt || (sw === bwt && Number(s.reps) > Number(b.reps)) ? s : b;
+    }, work[0]);
+    return `${shortLiftName(ex.name)} ${fmtSetShort(top.weight, bw)} × ${top.reps}`;
+  }
+  return null;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // PRIMITIVES
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1604,7 +1622,6 @@ export default function App() {
   const [routineVersion, setRoutineVersion] = useState(0); // bumps when the program changes
   const [routineDay, setRoutineDay] = useState(null);
   const [routineReset, setRoutineReset] = useState(0);
-  const [swiping, setSwiping] = useState(false);
   const [noEnter, setNoEnter] = useState(false);
   const underRef = useRef(null);
   const saveTimer = useRef(null);
@@ -1992,7 +2009,7 @@ export default function App() {
           />
     );
     if (t === "history") return (
-          <HistoryScreen history={history} onOpen={w => { setDetailWorkout(w); setScreen("detail"); window.scrollTo(0, 0); }} />
+          <HistoryScreen history={history} target={target} onOpen={w => { setDetailWorkout(w); setScreen("detail"); window.scrollTo(0, 0); }} />
     );
     return (
           <ProgressScreen
@@ -2021,10 +2038,8 @@ export default function App() {
         </div>
       ) : (
         <SwipeBack
-          onStart={() => setSwiping(true)}
-          onProgress={p => { if (underRef.current) setUnderlayProgress(underRef.current, p); }}
-          onCancel={() => setSwiping(false)}
-          onBack={() => { setNoEnter(true); setSwiping(false); goBack(); setTimeout(() => setNoEnter(false), 450); }}
+          underRef={underRef}
+          onBack={() => { setNoEnter(true); goBack(); setTimeout(() => setNoEnter(false), 450); }}
         >
           <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh" }}>
         {screen === "workout" && active ? (
@@ -2071,11 +2086,15 @@ export default function App() {
         </SwipeBack>
       )}
 
-      {swiping ? (
-        <div ref={underRef} aria-hidden="true" className="no-enter" style={{ position: "fixed", inset: 0, zIndex: 0, overflow: "hidden", background: c.bg, pointerEvents: "none", transform: "translateX(-28%)" }}>
+      {!isTab ? (
+        // Pre-rendered, hidden screen to reveal while swiping back
+        <div ref={underRef} aria-hidden="true" className="no-enter" style={{
+          position: "fixed", inset: 0, zIndex: 0, overflow: "hidden",
+          background: c.bg, pointerEvents: "none", visibility: "hidden",
+        }}>
           <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", paddingBottom: 120 }}>{tabEl(tab)}</div>
           <BottomNav tab={tab} onSwitch={() => {}} />
-          <div data-dim style={{ position: "absolute", inset: 0, background: "#000", opacity: 0.18 }} />
+          <div data-dim style={{ position: "absolute", inset: 0, background: "#000", opacity: 0 }} />
         </div>
       ) : null}
 
@@ -2093,87 +2112,185 @@ export default function App() {
   );
 }
 
-// Parallax + dim on the screen underneath while the page is dragged away
-function setUnderlayProgress(el, p) {
-  el.style.transform = `translateX(${-28 * (1 - p)}%)`;
-  const dim = el.querySelector("[data-dim]");
-  if (dim) dim.style.opacity = String(0.18 * (1 - p));
-}
+// iOS-style swipe back, built the way UIKit's interactive pop works:
+// - 1:1 tracking from the left edge; the screen underneath parallaxes in from
+//   30% and un-dims as you drag.
+// - On release, Apple projects where the finger's momentum would carry the
+//   page (UIScrollView deceleration, rate 0.998) and completes if that point
+//   passes the midpoint, so a short fast flick still goes back.
+// - The settle is a critically damped spring that starts at the finger's
+//   release velocity, so there's no speed jump when you let go.
+// - Interruptible: touch the page mid-animation and you catch it again.
+// Page is lifted into a viewport-sized layer while dragging so it can move on
+// the GPU; every frame is transform/opacity only.
+let SWIPE_LIFTED = false; // true while the page is lifted for a swipe
 
-// iOS-style swipe back: drag from the left edge. Moves the page with "left"
-// rather than a transform, so fixed bars inside stay fixed; they follow the
-// drag via the --swipe-x variable.
-function SwipeBack({ onBack, onStart, onProgress, onCancel, children }) {
+function SwipeBack({ onBack, underRef, children }) {
   const ref = useRef(null);
   const cb = useRef({});
-  cb.current = { onBack, onStart, onProgress, onCancel };
+  cb.current = { onBack };
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const root = document.documentElement;
-    let s = null;
-    const setX = x => { el.style.left = `${x}px`; root.style.setProperty("--swipe-x", `${x}px`); };
+    const PARALLAX = 30;       // % the screen underneath starts shifted left
+    const DIM = 0.16;          // backdrop dim at rest
+    const EDGE = 28;           // px from the left edge that starts a swipe
+    const RESPONSE = 0.36;     // spring response (s); UIKit-like critically damped
+    const DECEL = 0.998;       // UIScrollView.DecelerationRate.normal
+    const W = () => window.innerWidth;
+
+    let drag = null;           // active touch
+    let x = 0;                 // current page offset (px)
+    let lifted = false;
+    let savedY = 0;
+    let anim = 0;              // rAF id for the settle spring
+    let frame = 0;             // rAF id for drag painting
+
+    const under = () => {
+      const u = underRef.current;
+      return u ? { u, dim: u.querySelector("[data-dim]") } : null;
+    };
+    function paint() {
+      frame = 0;
+      const p = Math.min(1, Math.max(0, x / W()));
+      el.style.transform = `translate3d(${x}px, 0, 0)`;
+      const b = under();
+      if (b) {
+        b.u.style.transform = `translate3d(${-PARALLAX * (1 - p)}%, 0, 0)`;
+        if (b.dim) b.dim.style.opacity = String(DIM * (1 - p));
+      }
+    }
+    function lift() {
+      if (lifted) return;
+      lifted = true;
+      SWIPE_LIFTED = true;
+      savedY = window.scrollY;
+      Object.assign(el.style, {
+        position: "fixed", top: "0", left: "0", right: "0", bottom: "0",
+        overflow: "hidden", willChange: "transform",
+      });
+      el.scrollTop = savedY;
+      el.style.setProperty("--lift-y", `${savedY}px`); // keep fixed bars in place
+      const b = under();
+      if (b) Object.assign(b.u.style, { visibility: "visible", willChange: "transform" });
+      paint();
+    }
+    function drop() {
+      if (!lifted) return;
+      lifted = false;
+      Object.assign(el.style, {
+        position: "", top: "", left: "", right: "", bottom: "",
+        overflow: "", willChange: "", transform: "",
+      });
+      el.style.removeProperty("--lift-y");
+      window.scrollTo(0, savedY);
+      SWIPE_LIFTED = false;
+      const b = under();
+      if (b) Object.assign(b.u.style, { visibility: "hidden", willChange: "", transform: "" });
+    }
+    // Where momentum would carry the page (Apple's projection formula)
+    const project = vPxPerMs => vPxPerMs * (DECEL / (1 - DECEL));
+
+    function settle(target, v0PxPerMs, done) {
+      cancelAnimationFrame(anim);
+      const omega = (2 * Math.PI) / RESPONSE;   // critically damped: zeta = 1
+      let v = v0PxPerMs * 1000;                 // px/s
+      let last = performance.now();
+      const step = now => {
+        let dt = Math.min(0.032, (now - last) / 1000);
+        last = now;
+        // semi-implicit Euler in small substeps for stability
+        const n = 4;
+        for (let i = 0; i < n; i++) {
+          const h = dt / n;
+          const a = -omega * omega * (x - target) - 2 * omega * v;
+          v += a * h;
+          x += v * h;
+        }
+        if (target > 0 && x > target) { x = target; v = 0; } // never overshoot past the edge
+        if (x < 0) { x = 0; v = 0; }
+        paint();
+        if (Math.abs(x - target) < 0.5 && Math.abs(v) < 20) {
+          x = target;
+          paint();
+          anim = 0;
+          done();
+        } else {
+          anim = requestAnimationFrame(step);
+        }
+      };
+      anim = requestAnimationFrame(step);
+    }
+
     function start(e) {
       if (e.touches.length !== 1) return;
       const t = e.touches[0];
-      if (t.clientX > 30) return;
-      if (document.querySelector(".sheet-up")) return; // a sheet is open
-      s = { x0: t.clientX, y0: t.clientY, dx: 0, lock: null, lastX: t.clientX, lastT: performance.now(), v: 0 };
+      if (anim) {
+        // Catch the page mid-animation
+        cancelAnimationFrame(anim);
+        anim = 0;
+        drag = { x0: t.clientX - x, y0: t.clientY, lock: "x", lastX: t.clientX, lastT: performance.now(), v: 0 };
+        return;
+      }
+      if (t.clientX > EDGE || document.querySelector(".sheet-up")) return;
+      drag = { x0: t.clientX, y0: t.clientY, lock: null, lastX: t.clientX, lastT: performance.now(), v: 0 };
     }
     function move(e) {
-      if (!s) return;
+      if (!drag) return;
       const t = e.touches[0];
-      const dx = t.clientX - s.x0, dy = t.clientY - s.y0;
-      if (!s.lock) {
-        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
-        if (dx > 0 && Math.abs(dx) > Math.abs(dy)) {
-          s.lock = "x";
-          el.style.transition = "none";
-          cb.current.onStart();
-        } else { s = null; return; }
+      const dx = t.clientX - drag.x0;
+      const dy = t.clientY - drag.y0;
+      if (!drag.lock) {
+        if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+        if (dx > 0 && Math.abs(dx) > Math.abs(dy) * 1.2) { drag.lock = "x"; lift(); }
+        else { drag = null; return; }
       }
-      e.preventDefault();
+      if (e.cancelable) e.preventDefault();
       const now = performance.now();
-      s.v = (t.clientX - s.lastX) / Math.max(1, now - s.lastT);
-      s.lastX = t.clientX; s.lastT = now;
-      s.dx = Math.max(0, dx);
-      setX(s.dx);
-      cb.current.onProgress(Math.min(1, s.dx / window.innerWidth));
+      const dt = Math.max(1, now - drag.lastT);
+      drag.v = drag.v * 0.5 + ((t.clientX - drag.lastX) / dt) * 0.5; // smoothed px/ms
+      drag.lastX = t.clientX;
+      drag.lastT = now;
+      x = Math.max(0, dx);
+      if (!frame) frame = requestAnimationFrame(paint);
     }
     function end() {
-      if (!s || s.lock !== "x") { s = null; return; }
-      const W = window.innerWidth;
-      const go = s.dx > W * 0.35 || (s.v > 0.45 && s.dx > 40);
-      s = null;
-      el.style.transition = "left 240ms cubic-bezier(0.2, 0.8, 0.2, 1)";
-      setX(go ? W : 0);
-      cb.current.onProgress(go ? 1 : 0);
-      setTimeout(() => {
-        el.style.transition = "";
-        root.style.setProperty("--swipe-x", "0px");
-        if (go) cb.current.onBack();
-        else { el.style.left = ""; cb.current.onCancel(); }
-      }, 240);
+      if (!drag) return;
+      const d = drag;
+      drag = null;
+      if (d.lock !== "x") return;
+      if (frame) { cancelAnimationFrame(frame); frame = 0; }
+      const v = performance.now() - d.lastT > 80 ? 0 : d.v; // paused before lifting
+      const w = W();
+      const go = x + project(v) > w / 2;
+      settle(go ? w : 0, v, () => {
+        if (go) { SWIPE_LIFTED = false; cb.current.onBack(); }
+        else drop();
+      });
     }
-    el.addEventListener("touchstart", start, { passive: true });
-    el.addEventListener("touchmove", move, { passive: false });
-    el.addEventListener("touchend", end);
-    el.addEventListener("touchcancel", end);
+    // Listen on the window so a moving page can be caught wherever you touch
+    window.addEventListener("touchstart", start, { passive: true });
+    window.addEventListener("touchmove", move, { passive: false });
+    window.addEventListener("touchend", end);
+    window.addEventListener("touchcancel", end);
     return () => {
-      el.removeEventListener("touchstart", start);
-      el.removeEventListener("touchmove", move);
-      el.removeEventListener("touchend", end);
-      el.removeEventListener("touchcancel", end);
-      root.style.setProperty("--swipe-x", "0px");
+      cancelAnimationFrame(anim);
+      cancelAnimationFrame(frame);
+      window.removeEventListener("touchstart", start);
+      window.removeEventListener("touchmove", move);
+      window.removeEventListener("touchend", end);
+      window.removeEventListener("touchcancel", end);
+      SWIPE_LIFTED = false;
     };
   }, []);
   return (
     <div
       ref={ref}
       style={{
-        position: "relative", zIndex: 1, left: 0,
+        position: "relative", zIndex: 1,
         background: c.bg, minHeight: "100vh",
-        boxShadow: "-10px 0 30px rgba(0,0,0,0.14)",
+        boxShadow: "-8px 0 24px rgba(0,0,0,0.12)",
+        touchAction: "pan-y",
       }}
     >{children}</div>
   );
@@ -2412,7 +2529,7 @@ function BottomNav({ tab, onSwitch }) {
   return (
     <nav style={{
       position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 200,
-      padding: "0 12px calc(env(safe-area-inset-bottom) + 10px)",
+      padding: "0 12px max(10px, calc(env(safe-area-inset-bottom) - 4px))",
       pointerEvents: "none",
     }}>
       <div style={{
@@ -2580,7 +2697,7 @@ function WorkoutScreen({
   const cardRefs = useRef({});
   const [scrolled, setScrolled] = useState(false);
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 64);
+    const onScroll = () => { if (!SWIPE_LIFTED) setScrolled(window.scrollY > 64); };
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
@@ -2861,9 +2978,9 @@ function WorkoutScreen({
       {/* Bottom dock: rest countdown while resting, otherwise Finish */}
       <div style={{
         position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 150,
-        transform: "translateX(var(--swipe-x, 0px))",
+        transform: "translateY(var(--lift-y, 0px))",
         background: `linear-gradient(to top, ${c.bg} 62%, ${a(c.bg, 0)})`,
-        padding: "26px 16px calc(env(safe-area-inset-bottom) + 14px)",
+        padding: "26px 16px max(12px, env(safe-area-inset-bottom))",
       }}>
         <div style={{ maxWidth: 448, margin: "0 auto" }}>
           {rest ? (
@@ -2889,9 +3006,9 @@ function WorkoutScreen({
 
       {toast ? (
         <div key={toast.id} role="status" className="pop" style={{
-          position: "fixed", left: 0, right: 0, bottom: "calc(env(safe-area-inset-bottom) + 108px)", zIndex: 160,
-          transform: "translateX(var(--swipe-x, 0px))",
-          display: "flex", justifyContent: "center", pointerEvents: "none",
+          position: "fixed", left: 0, right: 0, bottom: "calc(env(safe-area-inset-bottom) + 94px)", zIndex: 160,
+          transform: "translateY(var(--lift-y, 0px))",
+            display: "flex", justifyContent: "center", pointerEvents: "none",
         }}>
           <div style={{
             display: "flex", alignItems: "center", gap: 10,
@@ -3609,71 +3726,240 @@ function ScreenTitle({ title, sub, right }) {
   );
 }
 
-function HistoryScreen({ history, onOpen }) {
-  const grouped = useMemo(() => {
+function HistoryScreen({ history, target, onOpen }) {
+  const [filter, setFilter] = useState(() => HistoryScreen.lastFilter || "all");
+  const [openMonths, setOpenMonths] = useState({});
+  useEffect(() => { HistoryScreen.lastFilter = filter; }, [filter]);
+
+  // PRs and headline lift per session, computed once per history change
+  const meta = useMemo(() => {
+    const m = new Map();
+    const asc = [...history].sort((x, y) => x.startedAt - y.startedAt);
+    const before = [];
+    for (const w of asc) {
+      const prs = detectSessionPRs(w, [...before].reverse());
+      m.set(w.id, { prs: prs.length, lead: sessionHeadline(w) });
+      before.push(w);
+    }
+    return m;
+  }, [history]);
+
+  const list = filter === "all" ? history : history.filter(w => w.dayId === filter);
+  const mon = mondayOf(Date.now());
+  const recentStart = addDays(mon, -7).getTime(); // this week and last week stay open
+
+  const recent = list.filter(w => w.startedAt >= recentStart);
+  const older = list.filter(w => w.startedAt < recentStart);
+  const months = useMemo(() => {
     const map = new Map();
-    for (const w of history) {
+    for (const w of older) {
       const d = new Date(w.startedAt);
       const key = `${d.getFullYear()}-${d.getMonth()}`;
-      const label = d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-      if (!map.has(key)) map.set(key, { label, items: [] });
+      if (!map.has(key)) {
+        const sameYear = d.getFullYear() === new Date().getFullYear();
+        map.set(key, { key, label: d.toLocaleDateString("en-US", sameYear ? { month: "long" } : { month: "long", year: "numeric" }), items: [] });
+      }
       map.get(key).items.push(w);
     }
     return Array.from(map.values());
-  }, [history]);
+  }, [older.length, filter, history]);
+
+  const dayLabel = filter === "all" ? "" : `${findDay(filter).label.toLowerCase()} `;
+  const totalPRs = list.reduce((n, w) => n + ((meta.get(w.id) || {}).prs || 0), 0);
 
   return (
     <div className="rise">
-      <ScreenTitle title="History" sub={`${history.length} session${history.length === 1 ? "" : "s"} logged`} />
-      {history.length ? <TrainingGrid history={history} /> : null}
+      <ScreenTitle
+        title="History"
+        sub={`${list.length} ${dayLabel}session${list.length === 1 ? "" : "s"}${totalPRs ? `, ${totalPRs} PR${totalPRs === 1 ? "" : "s"}` : ""}`}
+      />
+
+      {history.length ? (
+        <div style={{ display: "flex", gap: 8, padding: "0 20px 18px", overflowX: "auto" }}>
+          {[{ id: "all", label: "All" }, ...DAYS].map(d => {
+            const on = filter === d.id;
+            return (
+              <button
+                key={d.id}
+                onClick={() => setFilter(d.id)}
+                className="tap"
+                aria-pressed={on}
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 7, flexShrink: 0,
+                  height: 38, padding: "0 15px", borderRadius: 99,
+                  fontSize: 14, fontWeight: 750,
+                  background: on ? c.ink : c.surface,
+                  color: on ? c.bg : c.ink2,
+                  boxShadow: on ? "none" : `inset 0 0 0 1px ${c.lineSoft}`,
+                }}
+              >
+                {d.color ? <span style={{ width: 9, height: 9, borderRadius: 99, background: d.color }} /> : null}
+                {d.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
       {!history.length ? (
         <div style={{ padding: "0 20px" }}>
           <EmptyState icon={<ClipboardList size={20} />} title="Nothing logged yet" sub="Finished workouts show up here. Start one from Today." />
         </div>
-      ) : grouped.map((g, gi) => (
-        <Section key={gi} title={g.label} aside={`${g.items.length} session${g.items.length === 1 ? "" : "s"}`}>
-          <div className="card" style={{ overflow: "hidden" }}>
-            {g.items.map((w, i) => {
-              const day = findDay(w.dayId);
-              const d = new Date(w.startedAt);
-              return (
-                <button
-                  key={w.id}
-                  onClick={() => onOpen(w)}
-                  className="tap"
-                  style={{
-                    width: "100%", display: "flex", alignItems: "center", gap: 14,
-                    padding: "12px 16px", textAlign: "left",
-                    borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}`,
-                  }}
-                >
-                  <div style={{
-                    width: 44, height: 44, borderRadius: 12, flexShrink: 0,
-                    background: day ? day.color : c.inset, color: day ? day.on : c.ink,
-                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-                  }}>
-                    <span className="display num" style={{ fontSize: 20 }}>{d.getDate()}</span>
-                    <span style={{ fontSize: 9, fontWeight: 750, marginTop: 1, opacity: 0.85 }}>
-                      {d.toLocaleDateString("en-US", { weekday: "short" })}
-                    </span>
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 16, fontWeight: 700 }}>{day ? day.label : "Workout"}</div>
-                    <div className="num" style={{ fontSize: 13, color: c.ink3, marginTop: 1 }}>
-                      {workoutSets(w)} set{workoutSets(w) === 1 ? "" : "s"}{w.completedAt ? `, ${fmtDur(w.completedAt - w.startedAt)}` : ""}
+      ) : (
+        <>
+          <TrainingGrid history={history} filter={filter} onOpen={onOpen} />
+
+          {!list.length ? (
+            <div style={{ padding: "0 20px" }}>
+              <EmptyState icon={<ClipboardList size={20} />} title={`No ${dayLabel}sessions yet`} sub="They'll show up here once you log one." />
+            </div>
+          ) : null}
+
+          {weekGroups(recent).map(g => (
+            <WeekGroup key={g.start} group={g} target={filter === "all" ? target : null} meta={meta} onOpen={onOpen} />
+          ))}
+
+          {months.length ? (
+            <Section title={recent.length ? "Earlier" : null}>
+              <div className="card" style={{ overflow: "hidden" }}>
+                {months.map((m, i) => {
+                  const open = !!openMonths[m.key];
+                  const prs = m.items.reduce((n, w) => n + ((meta.get(w.id) || {}).prs || 0), 0);
+                  const byDay = DAYS.map(d => ({ d, n: m.items.filter(w => w.dayId === d.id).length })).filter(x => x.n);
+                  return (
+                    <div key={m.key} style={{ borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}>
+                      <button
+                        onClick={() => setOpenMonths(o => ({ ...o, [m.key]: !o[m.key] }))}
+                        className="tap"
+                        aria-expanded={open}
+                        style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "15px 16px", textAlign: "left" }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 16, fontWeight: 750 }}>{m.label}</div>
+                          <div className="num" style={{ fontSize: 13, color: c.ink3, marginTop: 2 }}>
+                            {m.items.length} session{m.items.length === 1 ? "" : "s"}{prs ? `, ${prs} PR${prs === 1 ? "" : "s"}` : ""}
+                          </div>
+                        </div>
+                        <div aria-hidden="true" style={{ display: "flex", gap: 3 }}>
+                          {byDay.map(x => (
+                            <span key={x.d.id} className="num" style={{
+                              minWidth: 22, height: 22, padding: "0 6px", borderRadius: 99,
+                              display: "inline-flex", alignItems: "center", justifyContent: "center",
+                              background: a(x.d.color, 16), color: x.d.ink, fontSize: 12, fontWeight: 800,
+                            }}>{x.n}</span>
+                          ))}
+                        </div>
+                        <ChevronRight size={18} color={c.ink4} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform 200ms ease" }} />
+                      </button>
+                      <Collapse open={open}>
+                        <div style={{ padding: "0 0 6px" }}>
+                          {weekGroups(m.items).map(g => (
+                            <WeekGroup key={g.start} group={g} target={filter === "all" ? target : null} meta={meta} onOpen={onOpen} nested />
+                          ))}
+                        </div>
+                      </Collapse>
                     </div>
-                  </div>
-                  <div className="num" style={{ fontSize: 15, fontWeight: 700, flexShrink: 0 }}>
-                    {fmtNum(workoutVolume(w))}<span style={{ fontSize: 12, color: c.ink3, marginLeft: 2 }}>lb</span>
-                  </div>
-                  <ChevronRight size={18} color={c.ink4} />
-                </button>
-              );
-            })}
-          </div>
-        </Section>
-      ))}
+                  );
+                })}
+              </div>
+            </Section>
+          ) : null}
+        </>
+      )}
     </div>
+  );
+}
+
+// Group sessions (newest first) into Monday-start weeks
+function weekGroups(sessions) {
+  const map = new Map();
+  for (const w of sessions) {
+    const start = mondayOf(w.startedAt).getTime();
+    if (!map.has(start)) map.set(start, { start, items: [] });
+    map.get(start).items.push(w);
+  }
+  return Array.from(map.values()).sort((x, y) => y.start - x.start);
+}
+
+function weekLabel(start) {
+  const s = new Date(start);
+  const e = addDays(s, 6);
+  const thisMon = mondayOf(Date.now()).getTime();
+  if (start === thisMon) return "This week";
+  if (start === addDays(new Date(thisMon), -7).getTime()) return "Last week";
+  const m1 = s.toLocaleDateString("en-US", { month: "short" });
+  const m2 = e.toLocaleDateString("en-US", { month: "short" });
+  return m1 === m2 ? `${m1} ${s.getDate()}–${e.getDate()}` : `${m1} ${s.getDate()} – ${m2} ${e.getDate()}`;
+}
+
+function WeekGroup({ group, target, meta, onOpen, nested }) {
+  const n = group.items.length;
+  const vol = group.items.reduce((s, w) => s + workoutVolume(w), 0);
+  const hit = target && n >= target;
+  const header = (
+    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, padding: nested ? "10px 16px 6px" : "0 4px 10px" }}>
+      <span style={{ fontSize: nested ? 14 : 17, fontWeight: nested ? 750 : 700, letterSpacing: "-0.01em", color: nested ? c.ink2 : c.ink }}>
+        {weekLabel(group.start)}
+      </span>
+      <span className="num" style={{ fontSize: 13, color: c.ink3, display: "inline-flex", alignItems: "center", gap: 6 }}>
+        {target ? (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: hit ? c.good : c.ink3, fontWeight: 700 }}>
+            {hit ? <Check size={14} strokeWidth={3} /> : null}{n} of {target}
+          </span>
+        ) : `${n} session${n === 1 ? "" : "s"}`}
+        <span>{fmtNum(vol)} lb</span>
+      </span>
+    </div>
+  );
+  const rows = group.items.map((w, i) => (
+    <SessionRow key={w.id} w={w} meta={meta.get(w.id)} first={i === 0} onOpen={onOpen} />
+  ));
+  if (nested) return <div>{header}<div>{rows}</div></div>;
+  return (
+    <section style={{ padding: "0 20px", marginBottom: 24 }}>
+      {header}
+      <div className="card" style={{ overflow: "hidden" }}>{rows}</div>
+    </section>
+  );
+}
+
+function SessionRow({ w, meta, first, onOpen }) {
+  const day = findDay(w.dayId);
+  const d = new Date(w.startedAt);
+  const m = meta || { prs: 0, lead: null };
+  return (
+    <button
+      onClick={() => onOpen(w)}
+      className="tap"
+      style={{
+        width: "100%", display: "flex", alignItems: "center", gap: 12,
+        padding: "13px 16px", textAlign: "left",
+        borderTop: first ? "none" : `1px solid ${c.lineSoft}`,
+      }}
+    >
+      <span aria-hidden="true" style={{ width: 4, alignSelf: "stretch", minHeight: 36, borderRadius: 2, background: day ? day.color : c.ink4, flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+          <span style={{ fontSize: 16, fontWeight: 750 }}>{day ? day.label : "Workout"}</span>
+          <span className="num" style={{ fontSize: 13, color: c.ink3, flexShrink: 0 }}>
+            {d.toLocaleDateString("en-US", { weekday: "short" })} {d.getDate()}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 3 }}>
+          <span className="num" style={{ fontSize: 13, color: c.ink2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+            {m.lead || `${workoutSets(w)} sets`}
+          </span>
+          {m.prs ? (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0, fontSize: 12, fontWeight: 800, color: c.good, background: a(c.good, 12), padding: "2px 7px", borderRadius: 6 }}>
+              <Trophy size={11} strokeWidth={2.8} /> {m.prs} PR{m.prs === 1 ? "" : "s"}
+            </span>
+          ) : (
+            <span className="num" style={{ fontSize: 12, color: c.ink4, flexShrink: 0 }}>{fmtNum(workoutVolume(w))} lb</span>
+          )}
+        </div>
+      </div>
+      <ChevronRight size={17} color={c.ink4} style={{ flexShrink: 0 }} />
+    </button>
   );
 }
 
@@ -4432,49 +4718,62 @@ function ChartTip({ active, payload, field, unit }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TRAINING GRID — last 20 weeks, one square per day, colored by day
+// TRAINING GRID — last 12 weeks, one square per day; tap a day to open it
 // ═══════════════════════════════════════════════════════════════════════════
-function TrainingGrid({ history }) {
-  const WEEKS = 20;
+function TrainingGrid({ history, filter = "all", onOpen }) {
+  const WEEKS = 12;
   const mon = mondayOf(Date.now());
   const start = addDays(mon, -7 * (WEEKS - 1));
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const byDate = new Map();
   for (const w of history) {
+    if (filter !== "all" && w.dayId !== filter) continue;
     const d = new Date(w.startedAt); d.setHours(0, 0, 0, 0);
-    if (!byDate.has(d.getTime())) byDate.set(d.getTime(), findDay(w.dayId));
+    if (!byDate.has(d.getTime())) byDate.set(d.getTime(), w); // history is newest first
   }
   const cols = Array.from({ length: WEEKS }, (_, wi) =>
     Array.from({ length: 7 }, (_, di) => {
       const d = addDays(start, wi * 7 + di); d.setHours(0, 0, 0, 0);
-      return { t: d.getTime(), day: byDate.get(d.getTime()), future: d > today, today: d.getTime() === today.getTime() };
+      return { d, w: byDate.get(d.getTime()), future: d > today, today: d.getTime() === today.getTime() };
     })
   );
-  const count = history.filter(w => w.startedAt >= start.getTime()).length;
+  const count = Array.from(byDate.keys()).filter(t => t >= start.getTime()).length;
+  const monthMarks = cols.map((col, i) => {
+    const first = col[0].d;
+    const prev = i ? cols[i - 1][0].d : null;
+    return !prev || prev.getMonth() !== first.getMonth() ? first.toLocaleDateString("en-US", { month: "short" }) : "";
+  });
+
   return (
-    <Section title="Last 20 weeks" aside={`${count} session${count === 1 ? "" : "s"}`}>
-      <div className="card" style={{ padding: 16 }}>
-        <div role="img" aria-label={`${count} sessions in the last 20 weeks`} style={{ display: "grid", gridTemplateColumns: `repeat(${WEEKS}, 1fr)`, gap: 3 }}>
-          {cols.map((col, i) => (
-            <div key={i} style={{ display: "grid", gridTemplateRows: "repeat(7, auto)", gap: 3 }}>
-              {col.map((cell, j) => (
-                <div key={j} style={{
-                  aspectRatio: "1 / 1", borderRadius: 3,
-                  background: cell.day ? cell.day.color : cell.future ? "transparent" : c.inset,
-                  boxShadow: cell.today ? `0 0 0 1.5px ${c.ink}` : "none",
-                }} />
-              ))}
-            </div>
+    <Section title="Last 12 weeks" aside={`${count} session${count === 1 ? "" : "s"}, tap a day to open`}>
+      <div className="card" style={{ padding: "14px 14px 12px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${WEEKS}, 1fr)`, gap: 4, marginBottom: 6 }}>
+          {monthMarks.map((m, i) => (
+            <span key={i} style={{ fontSize: 10, fontWeight: 700, color: c.ink3, whiteSpace: "nowrap", overflow: "visible" }}>{m}</span>
           ))}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 12, fontSize: 12, color: c.ink3 }}>
-          {DAYS.map(d => (
-            <span key={d.id} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-              <span style={{ width: 9, height: 9, borderRadius: 2, background: d.color }} />{d.label}
-            </span>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${WEEKS}, 1fr)`, gap: 4 }}>
+          {cols.map((col, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateRows: "repeat(7, auto)", gap: 4 }}>
+              {col.map((cell, j) => {
+                const day = cell.w ? findDay(cell.w.dayId) : null;
+                const style = {
+                  aspectRatio: "1 / 1", borderRadius: 5, width: "100%", padding: 0,
+                  background: day ? day.color : cell.future ? "transparent" : c.inset,
+                  boxShadow: cell.today ? `0 0 0 1.5px ${c.ink}` : "none",
+                };
+                return cell.w ? (
+                  <button
+                    key={j}
+                    onClick={() => onOpen(cell.w)}
+                    className="tap"
+                    aria-label={`${day ? day.label : "Workout"}, ${cell.d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}`}
+                    style={style}
+                  />
+                ) : <div key={j} style={style} />;
+              })}
+            </div>
           ))}
-          <span style={{ flex: 1 }} />
-          <span>Mon at top</span>
         </div>
       </div>
     </Section>
