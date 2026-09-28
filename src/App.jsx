@@ -152,9 +152,10 @@ const c = {
   ink: "var(--ink)", ink2: "var(--ink-2)", ink3: "var(--ink-3)", ink4: "var(--ink-4)",
   good: "var(--good)", danger: "var(--danger)", caution: "var(--caution)",
 };
-// Clearance at the top of each screen for the viewer's floating close/menu
-// buttons (Claude's full-screen artifact view). Set to 0 in a standalone app.
-const TOP_GAP = 52;
+// Extra clearance at the top of each screen, on top of the phone's safe area.
+// 0 for the standalone app; set to ~52 if viewing inside Claude's full-screen
+// artifact view, whose floating close/menu buttons sit over the top corners.
+const TOP_GAP = 0;
 
 const a = (color, pct) => `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 
@@ -210,6 +211,7 @@ function GlobalCSS() {
       }
 
       *, *::before, *::after { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+      html { overflow-x: clip; }
       html, body {
         margin: 0; padding: 0;
         background: var(--bg); color: var(--ink);
@@ -248,6 +250,7 @@ function GlobalCSS() {
       @keyframes livePulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
       .live-dot { animation: livePulse 2s ease-in-out infinite; }
       .fade-in { animation: fadeIn 160ms ease backwards; }
+      .no-enter .rise, .no-enter .fade-in { animation: none; }
       .rise { animation: rise 260ms cubic-bezier(0.16, 1, 0.3, 1) backwards; }
       .sheet-up { animation: sheetUp 280ms cubic-bezier(0.16, 1, 0.3, 1) both; }
       .pop { animation: pop 300ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
@@ -1022,10 +1025,17 @@ function isExerciseDone(ex) {
 }
 
 // Average duration of recent sessions for a day, for the "about 55m" estimate
+// Median of recent sessions, ignoring any left open for hours by accident
 function typicalDuration(history, dayId) {
-  const ws = history.filter(w => w.dayId === dayId && w.completedAt).slice(0, 6);
-  if (!ws.length) return null;
-  return ws.reduce((s, w) => s + (w.completedAt - w.startedAt), 0) / ws.length;
+  const ds = history
+    .filter(w => w.dayId === dayId && w.completedAt)
+    .map(w => w.completedAt - w.startedAt)
+    .filter(d => d > 5 * 60000 && d < 3 * 3600000)
+    .slice(0, 6)
+    .sort((x, y) => x - y);
+  if (!ds.length) return null;
+  const mid = Math.floor(ds.length / 2);
+  return ds.length % 2 ? ds[mid] : (ds[mid - 1] + ds[mid]) / 2;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1594,6 +1604,9 @@ export default function App() {
   const [routineVersion, setRoutineVersion] = useState(0); // bumps when the program changes
   const [routineDay, setRoutineDay] = useState(null);
   const [routineReset, setRoutineReset] = useState(0);
+  const [swiping, setSwiping] = useState(false);
+  const [noEnter, setNoEnter] = useState(false);
+  const underRef = useRef(null);
   const saveTimer = useRef(null);
 
   const isTab = screen === "home" || screen === "history" || screen === "progress";
@@ -1965,11 +1978,9 @@ export default function App() {
     );
   }
 
-  return (
-    <div style={{ minHeight: "100vh", background: c.bg, color: c.ink }}>
-      <GlobalCSS />
-      <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", paddingBottom: isTab ? 120 : 0 }}>
-        {screen === "home" ? (
+  // The three tab screens, reused as the backdrop while swiping back
+  const tabEl = t => {
+    if (t === "home") return (
           <HomeScreen
             key={routineVersion}
             history={history}
@@ -1979,11 +1990,11 @@ export default function App() {
             onStart={startWorkout}
             onResume={() => { setScreen("workout"); window.scrollTo(0, 0); }}
           />
-        ) : null}
-        {screen === "history" ? (
+    );
+    if (t === "history") return (
           <HistoryScreen history={history} onOpen={w => { setDetailWorkout(w); setScreen("detail"); window.scrollTo(0, 0); }} />
-        ) : null}
-        {screen === "progress" ? (
+    );
+    return (
           <ProgressScreen
             history={history}
             bodyweight={bodyweight}
@@ -1998,48 +2009,75 @@ export default function App() {
             onEditRoutine={dayId => { setRoutineDay(dayId); setScreen("routine"); window.scrollTo(0, 0); }}
             routineVersion={routineVersion}
           />
-        ) : null}
+    );
+  };
+
+  return (
+    <div className={noEnter ? "no-enter" : ""} style={{ minHeight: "100vh", background: c.bg, color: c.ink, overflowX: "clip" }}>
+      <GlobalCSS />
+      {isTab ? (
+        <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", paddingBottom: 120 }}>
+          {tabEl(screen)}
+        </div>
+      ) : (
+        <SwipeBack
+          onStart={() => setSwiping(true)}
+          onProgress={p => { if (underRef.current) setUnderlayProgress(underRef.current, p); }}
+          onCancel={() => setSwiping(false)}
+          onBack={() => { setNoEnter(true); setSwiping(false); goBack(); setTimeout(() => setNoEnter(false), 450); }}
+        >
+          <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh" }}>
         {screen === "workout" && active ? (
-          <WorkoutScreen
-            workout={active}
-            history={history}
-            bodyweight={bodyweight}
-            onBodyweightChange={updateBodyweight}
-            notes={notes}
-            onNoteChange={updateNote}
-            rest={rest}
-            onStartRest={startRest}
-            onAdjustRest={adjustRest}
-            onClearRest={() => setRest(null)}
-            onUpdate={updateActive}
-            onFinish={finishWorkout}
-            onDiscard={discardWorkout}
-            onDeleteExercise={deleteExerciseFromActive}
-            onBack={goBack}
-          />
-        ) : null}
-        {screen === "detail" && detailWorkout ? (
-          <DetailScreen workout={detailWorkout} history={history} onBack={goBack} onDelete={deleteWorkoutAction} onEdit={editWorkout} />
-        ) : null}
-        {screen === "routine" && routineDay ? (
-          <RoutineScreen
-            key={`${routineDay}-${routineReset}`}
-            day={findDay(routineDay)}
-            isCustom={!!(SETTINGS.routine && SETTINGS.routine[routineDay])}
-            onChange={list => updateRoutine(routineDay, list)}
-            onRename={renameExercise}
-            onReset={() => showSheet({
-              title: `Reset ${findDay(routineDay).label} day?`,
-              message: "Goes back to the original exercises. Your history is kept.",
-              actions: [
-                { label: "Reset to original", variant: "danger", fn: () => { closeSheet(); resetRoutine(routineDay); } },
-                { label: "Cancel", variant: "cancel", fn: closeSheet },
-              ],
-            })}
-            onBack={goBack}
-          />
-        ) : null}
-      </div>
+            <WorkoutScreen
+              workout={active}
+              history={history}
+              bodyweight={bodyweight}
+              onBodyweightChange={updateBodyweight}
+              notes={notes}
+              onNoteChange={updateNote}
+              rest={rest}
+              onStartRest={startRest}
+              onAdjustRest={adjustRest}
+              onClearRest={() => setRest(null)}
+              onUpdate={updateActive}
+              onFinish={finishWorkout}
+              onDiscard={discardWorkout}
+              onDeleteExercise={deleteExerciseFromActive}
+              onBack={goBack}
+            />
+          ) : null}
+          {screen === "detail" && detailWorkout ? (
+            <DetailScreen workout={detailWorkout} history={history} onBack={goBack} onDelete={deleteWorkoutAction} onEdit={editWorkout} />
+          ) : null}
+          {screen === "routine" && routineDay ? (
+            <RoutineScreen
+              key={`${routineDay}-${routineReset}`}
+              day={findDay(routineDay)}
+              isCustom={!!(SETTINGS.routine && SETTINGS.routine[routineDay])}
+              onChange={list => updateRoutine(routineDay, list)}
+              onRename={renameExercise}
+              onReset={() => showSheet({
+                title: `Reset ${findDay(routineDay).label} day?`,
+                message: "Goes back to the original exercises. Your history is kept.",
+                actions: [
+                  { label: "Reset to original", variant: "danger", fn: () => { closeSheet(); resetRoutine(routineDay); } },
+                  { label: "Cancel", variant: "cancel", fn: closeSheet },
+                ],
+              })}
+              onBack={goBack}
+            />
+          ) : null}
+          </div>
+        </SwipeBack>
+      )}
+
+      {swiping ? (
+        <div ref={underRef} aria-hidden="true" className="no-enter" style={{ position: "fixed", inset: 0, zIndex: 0, overflow: "hidden", background: c.bg, pointerEvents: "none", transform: "translateX(-28%)" }}>
+          <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", paddingBottom: 120 }}>{tabEl(tab)}</div>
+          <BottomNav tab={tab} onSwitch={() => {}} />
+          <div data-dim style={{ position: "absolute", inset: 0, background: "#000", opacity: 0.18 }} />
+        </div>
+      ) : null}
 
       {isTab ? <BottomNav tab={tab} onSwitch={goTab} /> : null}
       {sheet ? <ActionSheet {...sheet} onDismiss={closeSheet} /> : null}
@@ -2052,6 +2090,92 @@ export default function App() {
         />
       ) : null}
     </div>
+  );
+}
+
+// Parallax + dim on the screen underneath while the page is dragged away
+function setUnderlayProgress(el, p) {
+  el.style.transform = `translateX(${-28 * (1 - p)}%)`;
+  const dim = el.querySelector("[data-dim]");
+  if (dim) dim.style.opacity = String(0.18 * (1 - p));
+}
+
+// iOS-style swipe back: drag from the left edge. Moves the page with "left"
+// rather than a transform, so fixed bars inside stay fixed; they follow the
+// drag via the --swipe-x variable.
+function SwipeBack({ onBack, onStart, onProgress, onCancel, children }) {
+  const ref = useRef(null);
+  const cb = useRef({});
+  cb.current = { onBack, onStart, onProgress, onCancel };
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const root = document.documentElement;
+    let s = null;
+    const setX = x => { el.style.left = `${x}px`; root.style.setProperty("--swipe-x", `${x}px`); };
+    function start(e) {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (t.clientX > 30) return;
+      if (document.querySelector(".sheet-up")) return; // a sheet is open
+      s = { x0: t.clientX, y0: t.clientY, dx: 0, lock: null, lastX: t.clientX, lastT: performance.now(), v: 0 };
+    }
+    function move(e) {
+      if (!s) return;
+      const t = e.touches[0];
+      const dx = t.clientX - s.x0, dy = t.clientY - s.y0;
+      if (!s.lock) {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        if (dx > 0 && Math.abs(dx) > Math.abs(dy)) {
+          s.lock = "x";
+          el.style.transition = "none";
+          cb.current.onStart();
+        } else { s = null; return; }
+      }
+      e.preventDefault();
+      const now = performance.now();
+      s.v = (t.clientX - s.lastX) / Math.max(1, now - s.lastT);
+      s.lastX = t.clientX; s.lastT = now;
+      s.dx = Math.max(0, dx);
+      setX(s.dx);
+      cb.current.onProgress(Math.min(1, s.dx / window.innerWidth));
+    }
+    function end() {
+      if (!s || s.lock !== "x") { s = null; return; }
+      const W = window.innerWidth;
+      const go = s.dx > W * 0.35 || (s.v > 0.45 && s.dx > 40);
+      s = null;
+      el.style.transition = "left 240ms cubic-bezier(0.2, 0.8, 0.2, 1)";
+      setX(go ? W : 0);
+      cb.current.onProgress(go ? 1 : 0);
+      setTimeout(() => {
+        el.style.transition = "";
+        root.style.setProperty("--swipe-x", "0px");
+        if (go) cb.current.onBack();
+        else { el.style.left = ""; cb.current.onCancel(); }
+      }, 240);
+    }
+    el.addEventListener("touchstart", start, { passive: true });
+    el.addEventListener("touchmove", move, { passive: false });
+    el.addEventListener("touchend", end);
+    el.addEventListener("touchcancel", end);
+    return () => {
+      el.removeEventListener("touchstart", start);
+      el.removeEventListener("touchmove", move);
+      el.removeEventListener("touchend", end);
+      el.removeEventListener("touchcancel", end);
+      root.style.setProperty("--swipe-x", "0px");
+    };
+  }, []);
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: "relative", zIndex: 1, left: 0,
+        background: c.bg, minHeight: "100vh",
+        boxShadow: "-10px 0 30px rgba(0,0,0,0.14)",
+      }}
+    >{children}</div>
   );
 }
 
@@ -2097,7 +2221,7 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
   const activeTotal = active ? active.exercises.reduce((s, e) => s + e.sets.length, 0) : 0;
 
   return (
-    <div className="rise" style={{ padding: `calc(env(safe-area-inset-top) + ${TOP_GAP + 4}px) 16px 0` }}>
+    <div className="rise" style={{ padding: `calc(env(safe-area-inset-top) + ${TOP_GAP + 12}px) 16px 0` }}>
       {/* Hero: the next workout, colored like its plate */}
       <button
         onClick={active ? onResume : () => onStart(hero.id)}
@@ -2737,6 +2861,7 @@ function WorkoutScreen({
       {/* Bottom dock: rest countdown while resting, otherwise Finish */}
       <div style={{
         position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 150,
+        transform: "translateX(var(--swipe-x, 0px))",
         background: `linear-gradient(to top, ${c.bg} 62%, ${a(c.bg, 0)})`,
         padding: "26px 16px calc(env(safe-area-inset-bottom) + 14px)",
       }}>
@@ -2765,6 +2890,7 @@ function WorkoutScreen({
       {toast ? (
         <div key={toast.id} role="status" className="pop" style={{
           position: "fixed", left: 0, right: 0, bottom: "calc(env(safe-area-inset-bottom) + 108px)", zIndex: 160,
+          transform: "translateX(var(--swipe-x, 0px))",
           display: "flex", justifyContent: "center", pointerEvents: "none",
         }}>
           <div style={{
@@ -3473,7 +3599,7 @@ function ExercisePicker({ onPick, prefer }) {
 // ═══════════════════════════════════════════════════════════════════════════
 function ScreenTitle({ title, sub, right }) {
   return (
-    <header style={{ padding: `calc(env(safe-area-inset-top) + ${TOP_GAP + 8}px) 20px 18px`, display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12 }}>
+    <header style={{ padding: `calc(env(safe-area-inset-top) + ${TOP_GAP + 16}px) 20px 18px`, display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12 }}>
       <div>
         <h1 className="display" style={{ margin: 0, fontSize: 46 }}>{title}</h1>
         {sub ? <p style={{ margin: "8px 0 0", fontSize: 14, color: c.ink3 }}>{sub}</p> : null}
@@ -3794,7 +3920,9 @@ function OverviewView({ history }) {
   }
 
   const totalV = history.reduce((s, w) => s + workoutVolume(w), 0);
-  const avgD = history.reduce((s, w) => s + ((w.completedAt || w.startedAt) - w.startedAt), 0) / history.length;
+  const durs = history.filter(w => w.completedAt).map(w => w.completedAt - w.startedAt)
+    .filter(d => d > 5 * 60000 && d < 3 * 3600000).sort((x, y) => x - y);
+  const avgD = durs.length ? durs[Math.floor(durs.length / 2)] : 0;
   const byDay = DAYS.map(d => ({ ...d, count: history.filter(w => w.dayId === d.id).length }));
   const dayT = byDay.reduce((s, d) => s + d.count, 0);
 
@@ -3807,7 +3935,7 @@ function OverviewView({ history }) {
           <Stat label="Sessions" value={history.length} />
           <Stat label="Total volume" value={fmtNum(totalV)} unit="lb" />
           <Stat label="Per week, last 8" value={avgPerWeek(history)} />
-          <Stat label="Typical session" value={fmtDur(avgD)} />
+          <Stat label="Typical session" value={avgD ? fmtDur(avgD) : "—"} />
         </div>
       </Section>
 
