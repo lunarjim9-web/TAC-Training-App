@@ -4,12 +4,8 @@ import {
   TrendingUp, Activity, BarChart3, ClipboardList,
   Trophy, Download, Upload, Trash2, X, Shield,
   Repeat, Copy, Flame, Timer, SkipForward, MoreHorizontal,
-  FileText, Search, Undo2, ArrowRight, Pencil, ChevronUp, ChevronDown,
+  FileText, Search, Undo2, ArrowRight, Pencil, ChevronUp, ChevronDown, Settings,
 } from "lucide-react";
-import {
-  AreaChart, Area, BarChart, Bar, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-} from "recharts";
 import * as XLSX from "xlsx";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -277,7 +273,7 @@ const K_SETTINGS = "tac_settings_v2";
 const DEFAULT_SETTINGS = {
   bodyweight: 0, target: 3, theme: "system",
   notes: {}, perSide: {}, bars: {}, aliases: {}, routine: null,
-  recapSeen: null, lastBackup: 0, tipDismissed: false,
+  recapSeen: null, lastBackup: 0, tipDismissed: false, goals: {},
 };
 let SETTINGS = { ...DEFAULT_SETTINGS };
 let STORE_MODE = "device"; // becomes "claude" once artifact storage accepts a write
@@ -420,7 +416,7 @@ const fmtDate = ts => new Date(ts).toLocaleDateString("en-US", { month: "short",
 const fmtLong = ts => new Date(ts).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
 const fmtToday = ts => new Date(ts).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
 const fmtDur  = ms => { const m = Math.floor(ms / 60000); return m >= 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m}m`; };
-const fmtNum  = n  => n >= 10000 ? `${(n/1000).toFixed(0)}k` : n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(Math.round(n));
+const fmtNum  = n  => n >= 1e6 ? `${+(n/1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 10000 ? `${(n/1000).toFixed(0)}k` : n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(Math.round(n));
 const greet   = ()  => { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; };
 const timeAgo = ts  => {
   const d = Math.floor((Date.now() - ts) / 86400000);
@@ -797,7 +793,8 @@ function fmtSetShort(weight, bw) {
 }
 
 function fmtSetForText(s, bw) {
-  return `${s.warmup ? "warm-up " : ""}${fmtSetShort(s.weight, bw)}×${s.reps}`;
+  const rir = s.rir !== undefined && s.rir !== null ? ` RIR${Number(s.rir) >= 3 ? "3+" : s.rir}` : "";
+  return `${s.warmup ? "warm-up " : ""}${fmtSetShort(s.weight, bw)}×${s.reps}${rir}`;
 }
 
 function buildSessionText(w, prior, newPRs) {
@@ -810,7 +807,7 @@ function buildSessionText(w, prior, newPRs) {
   meta.push(`${workoutSets(w)} sets`, `${fmtNum(workoutVolume(w))} lb volume`);
   if (w.bodyweight) meta.push(`bodyweight ${w.bodyweight} lb`);
   lines.push(meta.join(", "));
-  lines.push("Loads in lb; BW = bodyweight, BW+10 = 10 lb added.");
+  lines.push("Loads in lb; BW = bodyweight, BW+10 = 10 lb added; RIR = reps left in reserve (0 = failure).");
   lines.push("");
   for (const ex of (w.exercises || [])) {
     const bw = exIsBW(ex);
@@ -1053,7 +1050,7 @@ function buildFullExportText(workouts, { bodyweight, target }) {
   }
   if (bodyweight) L.push(`Current bodyweight: ${bodyweight} lb`);
   L.push(`Weekly target: ${target} sessions`);
-  L.push("Loads in lb. BW = bodyweight only, BW+10 = bodyweight plus 10 lb. Only completed sets are listed; warm-up sets are marked and excluded from volume and PRs. Est. 1RM uses the Epley formula.");
+  L.push("Loads in lb. BW = bodyweight only, BW+10 = bodyweight plus 10 lb. Only completed sets are listed; warm-up sets are marked and excluded from volume and PRs. RIR = reps left in reserve (0 = failure). Est. 1RM uses the Epley formula.");
   L.push("");
 
   L.push("CURRENT PROGRAM");
@@ -1340,6 +1337,285 @@ function sessionHeadline(w) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// GAINS — the math behind the Progress tab
+// ═══════════════════════════════════════════════════════════════════════════
+const avg = arr => (arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : 0);
+
+// Rolling average of the last k points (smooths out one-off good/bad days)
+function smoothSeries(values, k = 3) {
+  return values.map((_, i) => avg(values.slice(Math.max(0, i - k + 1), i + 1)));
+}
+
+// Lifts with an estimated-1RM history, in routine order (first lift of each day first)
+function trackedLifts(history, minSessions = 2) {
+  const order = [];
+  const seen = new Set();
+  const push = n => { if (!seen.has(n)) { seen.add(n); order.push(n); } };
+  // Main lifts = the first two of each day (your compounds), then everything else
+  DAYS.forEach(d => d.exercises[0] && push(d.exercises[0].name));
+  DAYS.forEach(d => d.exercises[1] && push(d.exercises[1].name));
+  DAYS.forEach(d => d.exercises.forEach(e => push(e.name)));
+  const out = [];
+  for (const name of order) {
+    const series = exerciseTimeSeries(history, name).filter(s => s.e1rm);
+    if (series.length >= minSessions) {
+      const day = DAYS.find(d => d.exercises.some(e => e.name === name));
+      out.push({ name, series, day });
+    }
+  }
+  return out;
+}
+
+// Progressing / holding / stalled, from the smoothed e1RM series
+function liftStatus(series) {
+  const v = series.map(s => s.e1rm);
+  if (v.length < 3) return { key: "new", label: "Building data" };
+  const sm = smoothSeries(v);
+  const bestBefore = v.length >= 5 ? Math.max(...v.slice(0, -3)) : Infinity;
+  const recentBest = Math.max(...v.slice(-3));
+  if (v.length >= 5 && recentBest <= bestBefore) return { key: "stalled", label: "Stalled" };
+  const prev = sm[Math.max(0, sm.length - 4)];
+  if (sm[sm.length - 1] > prev * 1.01) return { key: "up", label: "Progressing" };
+  return { key: "flat", label: "Holding" };
+}
+
+// % change: average of first 3 sessions vs average of last 3
+function liftChange(series) {
+  const v = series.map(s => s.e1rm);
+  if (v.length < 2) return 0;
+  const k = Math.min(3, Math.floor(v.length / 2) || 1);
+  const a = avg(v.slice(0, k)), b = avg(v.slice(-k));
+  return a ? ((b - a) / a) * 100 : 0;
+}
+
+// Strength Index: average e1RM gain across your main lifts, 100 = where you started
+function strengthIndex(history, weeks = 12) {
+  const start = addDays(mondayOf(Date.now()), -7 * (weeks - 1));
+  const recentHistory = history.filter(w => w.startedAt >= start.getTime());
+  let lifts = trackedLifts(recentHistory, 3);
+  if (lifts.length < 1) return null;
+  lifts = lifts.slice(0, 6);
+  const points = [];
+  for (let i = 0; i < weeks; i++) {
+    const end = addDays(start, 7 * (i + 1)).getTime();
+    const ratios = [];
+    for (const l of lifts) {
+      const upTo = l.series.filter(s => s.date < end).map(s => s.e1rm);
+      if (!upTo.length) continue;
+      const base = avg(l.series.slice(0, 3).map(s => s.e1rm));
+      const cur = avg(upTo.slice(-3));
+      ratios.push(cur / base);
+    }
+    if (ratios.length) points.push({ t: addDays(start, 7 * i).getTime(), v: 100 * avg(ratios) });
+  }
+  if (points.length < 2) return { points, change: 0, lifts, short: true };
+  const change = points[points.length - 1].v - 100;
+  const firstDate = Math.min(...lifts.map(l => l.series[0].date));
+  return { points, change, lifts, since: firstDate };
+}
+
+// Share of working sets that beat the same set from the previous session of that lift
+function beatRateByWeek(history, weeks = 8) {
+  const asc = [...history].sort((x, y) => x.startedAt - y.startedAt);
+  const last = new Map();
+  const byWeek = new Map();
+  for (const w of asc) {
+    const wk = mondayOf(w.startedAt).getTime();
+    for (const ex of w.exercises || []) {
+      const cur = ex.sets.filter(s => s.done && !s.warmup);
+      const prev = last.get(ex.name);
+      if (prev && cur.length) {
+        const agg = byWeek.get(wk) || { beat: 0, n: 0 };
+        cur.forEach((s, i) => {
+          const p = prev[i];
+          if (!p) return;
+          agg.n++;
+          const sw = Number(s.weight) || 0, pw = Number(p.weight) || 0;
+          if (sw > pw || (sw === pw && Number(s.reps) > Number(p.reps))) agg.beat++;
+        });
+        byWeek.set(wk, agg);
+      }
+      if (cur.length) last.set(ex.name, cur);
+    }
+  }
+  const mon = mondayOf(Date.now());
+  return Array.from({ length: weeks }, (_, i) => {
+    const t = addDays(mon, -7 * (weeks - 1 - i)).getTime();
+    const g = byWeek.get(t) || { beat: 0, n: 0 };
+    return { t, beat: g.beat, n: g.n, pct: g.n ? (g.beat / g.n) * 100 : null };
+  });
+}
+
+// Goals: a working weight at the bottom of the rep range, projected from the e1RM trend
+function goalFor(name) { return (SETTINGS.goals || {})[name] || null; }
+function setGoal(name, weight) {
+  const goals = { ...(SETTINGS.goals || {}) };
+  if (weight) goals[name] = Number(weight); else delete goals[name];
+  saveSettings({ goals });
+}
+function goalProgress(name, series, repsText, bw) {
+  const goal = goalFor(name);
+  if (!goal || !series.length) return null;
+  const t = parseRepTarget(repsText || "8–12");
+  const reps = t ? t.min : 8;
+  const load = bw ? (CURRENT_BW ? CURRENT_BW + goal : 0) : goal;
+  if (!load) return { goal, reps, status: "needs-bw" };
+  const targetE = e1rm(load, reps);
+  const pts = series.slice(-8).filter(s => s.e1rm);
+  const cur = pts.length ? avg(pts.slice(-3).map(s => s.e1rm)) : 0;
+  if (cur >= targetE) return { goal, reps, status: "reached" };
+  const toGo = bw ? goal - Math.max(0, Math.round((cur / (1 + reps / 30)) - CURRENT_BW)) : Math.round(goal - cur / (1 + reps / 30));
+  if (pts.length < 3) return { goal, reps, status: "early", toGo };
+  // least-squares slope of e1RM per day
+  const xs = pts.map(p => p.date / 86400000), ys = pts.map(p => p.e1rm);
+  const mx = avg(xs), my = avg(ys);
+  const num = xs.reduce((s, x, i) => s + (x - mx) * (ys[i] - my), 0);
+  const den = xs.reduce((s, x) => s + (x - mx) ** 2, 0);
+  const slope = den ? num / den : 0;
+  if (slope <= 0.02) return { goal, reps, status: "flat", toGo };
+  const days = (targetE - cur) / slope;
+  if (days > 540) return { goal, reps, status: "far", toGo };
+  return { goal, reps, status: "pace", toGo, date: Date.now() + days * 86400000 };
+}
+function goalLine(g) {
+  if (!g) return null;
+  const tgt = `${g.goal} × ${g.reps}`;
+  if (g.status === "reached") return `Goal ${tgt} reached`;
+  if (g.status === "pace") return `Goal ${tgt}: on pace for ${fmtDate(g.date)}`;
+  if (g.status === "needs-bw") return `Goal ${tgt}: add bodyweight in Setup`;
+  if (g.status === "flat") return `Goal ${tgt}: ${Math.max(1, g.toGo)} lb to go, trend flat`;
+  return `Goal ${tgt}: ${Math.max(1, g.toGo || 0)} lb to go`;
+}
+
+// Milestones: next round number on each main lift, plus sessions and lifetime volume
+function nextMilestone(history) {
+  const cands = [];
+  for (const l of trackedLifts(history, 2).slice(0, 6)) {
+    const ex = DAYS.flatMap(d => d.exercises).find(e => e.name === l.name) || {};
+    if (ex.bw) continue;
+    const best = Math.max(...l.series.map(s => s.top));
+    const step = isLowerBody(l.name) ? 50 : 25;
+    const next = Math.floor(best / step) * step + step;
+    cands.push({ ratio: best / next, text: `${shortLiftName(l.name)}: ${next - best} lb from a ${next} top set`, name: l.name });
+  }
+  const n = history.length;
+  const nextN = [10, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500].find(x => x > n);
+  if (nextN) cands.push({ ratio: n / nextN, text: `${nextN - n} session${nextN - n === 1 ? "" : "s"} to your ${nextN}th workout` });
+  const vol = history.reduce((s, w) => s + workoutVolume(w), 0);
+  const nextV = [100e3, 250e3, 500e3, 750e3, 1e6, 1.5e6, 2e6, 3e6, 5e6].find(x => x > vol);
+  if (nextV) cands.push({ ratio: vol / nextV, text: `${fmtNum(nextV - vol)} lb to ${fmtNum(nextV)} lifted all-time` });
+  const close = cands.filter(x => x.ratio >= 0.93).sort((x, y) => y.ratio - x.ratio);
+  return close[0] || null;
+}
+
+// Days since each muscle was last trained as a main mover
+function recoveryMap(history) {
+  const out = {};
+  const now = Date.now();
+  for (const m of MUSCLES) out[m] = null;
+  for (const w of history) {
+    for (const ex of w.exercises || []) {
+      if (!ex.sets.some(s => s.done && !s.warmup)) continue;
+      const wts = muscleWeights(ex.name);
+      for (const m in wts) {
+        if (wts[m] < 1 || !(m in out)) continue;
+        const d = Math.floor((mondayOfDay(now) - mondayOfDay(w.startedAt)) / 86400000);
+        if (out[m] === null || d < out[m]) out[m] = d;
+      }
+    }
+  }
+  return out;
+}
+
+// Last week's recap for the Monday card
+function weekRecap(history, weekStart) {
+  const end = addDays(weekStart, 7).getTime();
+  const ws = history.filter(w => w.startedAt >= weekStart.getTime() && w.startedAt < end);
+  if (!ws.length) return null;
+  const prior = history.filter(w => w.startedAt < weekStart.getTime());
+  let prs = 0;
+  const asc = [...ws].sort((x, y) => x.startedAt - y.startedAt);
+  const seen = [...prior];
+  for (const w of asc) { prs += detectSessionPRs(w, seen).length; seen.unshift(w); }
+  const br = beatRateByWeek(history, 8).find(b => b.t === weekStart.getTime());
+  const idx = strengthIndex(history, 12);
+  let idxDelta = null;
+  if (idx && idx.points.length >= 2) {
+    const i = idx.points.findIndex(p => p.t === weekStart.getTime());
+    if (i > 0) idxDelta = idx.points[i].v - idx.points[i - 1].v;
+  }
+  return { sessions: ws.length, prs, beatPct: br && br.pct !== null ? br.pct : null, idxDelta, volume: ws.reduce((s, w) => s + workoutVolume(w), 0) };
+}
+
+// Keep numeric text clean: comma decimals (some keyboards) become dots, one dot max
+function cleanNum(v, decimals = true) {
+  let s = String(v ?? "").replace(/,/g, ".").replace(decimals ? /[^0-9.]/g : /[^0-9]/g, "");
+  if (decimals) {
+    const i = s.indexOf(".");
+    if (i >= 0) s = s.slice(0, i + 1) + s.slice(i + 1).replace(/\./g, "");
+  }
+  return s.slice(0, 7);
+}
+// "+11%", "+5.7%", "0%"
+function fmtPct(x) {
+  if (!isFinite(x) || Math.abs(x) < 0.05) return "0%";
+  return `${x > 0 ? "+" : ""}${x.toFixed(Math.abs(x) < 10 ? 1 : 0)}%`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TODAY — what's at stake in the next session
+// ═══════════════════════════════════════════════════════════════════════════
+// Each lift's top-set target for next time, flagged if hitting it would be a record
+function todayTargets(history, day) {
+  const rows = [];
+  for (const e of day.exercises) {
+    const bw = !!e.bw;
+    const rec = recommendNextSet(history, e.name, e.reps, bw);
+    if (!rec) continue;
+    // Top-set target: after a load increase, the new weight; otherwise beat
+    // your best set from last time by a rep (your first working set is freshest)
+    let t = { weight: rec.weight, reps: rec.reps };
+    if (!rec.increase) {
+      const last = (findLastSessionSets(history, e.name) || []).filter(x => !x.warmup);
+      const top = last.reduce((b, x) => (!b || (Number(x.weight) || 0) > (Number(b.weight) || 0) || ((Number(x.weight) || 0) === (Number(b.weight) || 0) && Number(x.reps) > Number(b.reps))) ? x : b, null);
+      const rt = parseRepTarget(e.reps);
+      if (top) t = { weight: top.weight, reps: String(Math.min(Number(top.reps) + 1, rt ? rt.max : Number(top.reps) + 1)) };
+    }
+    rows.push({ name: e.name, bw, ...t, kind: prKind(priorStats(history, e.name), t, bw, CURRENT_BW) });
+  }
+  const prs = rows.filter(r => r.kind);
+  const order = new Map(day.exercises.map((e, i) => [e.name, i]));
+  const shown = [...prs, ...rows.filter(r => !r.kind)].slice(0, 3).sort((x, y) => order.get(x.name) - order.get(y.name));
+  return { rows: shown, prCount: prs.length };
+}
+
+// Only when this week could break a streak of 2+ weeks
+function streakAtRisk(history, target) {
+  const mon = mondayOf(Date.now());
+  const done = sessionsBetween(history, mon, addDays(mon, 7));
+  if (done >= target) return null;
+  const past = weekStreak(history, target);
+  if (past < 2) return null;
+  const daysLeft = 7 - ((new Date().getDay() + 6) % 7); // including today
+  const need = target - done;
+  if (daysLeft > need + 1 || need > daysLeft) return null; // only when it's close and still savable
+  return { need, streak: past, daysLeft };
+}
+
+// The day's main muscles trained within 48h, if any (null = rested)
+function readinessFor(history, day) {
+  const rec = recoveryMap(history);
+  const muscles = new Set();
+  day.exercises.forEach(e => { const w = muscleWeights(e.name); for (const m in w) if (w[m] >= 1) muscles.add(m); });
+  let worst = null;
+  for (const m of muscles) {
+    const d = rec[m];
+    if (d !== null && d < 2 && (!worst || d < worst.d)) worst = { m, d };
+  }
+  return worst;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PRIMITIVES
 // ═══════════════════════════════════════════════════════════════════════════
 // Bottom sheet for choices and confirmations. The first normal action is the
@@ -1622,9 +1898,12 @@ export default function App() {
   const [routineVersion, setRoutineVersion] = useState(0); // bumps when the program changes
   const [routineDay, setRoutineDay] = useState(null);
   const [routineReset, setRoutineReset] = useState(0);
+  const [exerciseName, setExerciseName] = useState(null);
+  const openExercise = name => { setExerciseName(name); openScreen("exercise"); };
   const [noEnter, setNoEnter] = useState(false);
   const underRef = useRef(null);
   const saveTimer = useRef(null);
+  const scrollPos = useRef({});
 
   const isTab = screen === "home" || screen === "history" || screen === "progress";
 
@@ -1682,6 +1961,24 @@ export default function App() {
         setThemePref(SETTINGS.theme || "system");
         setNotes(SETTINGS.notes || {});
         setRoutineVersion(v => v + 1);
+        // A session left open for hours (forgot to tap Finish): offer to wrap it up
+        if (act && Date.now() - act.startedAt > 6 * 3600000) {
+          const logged = act.exercises.reduce((n, e) => n + e.sets.filter(x => x.done).length, 0);
+          const lastAt = Math.max(0, ...act.exercises.flatMap(e => e.sets.map(x => x.at || 0)));
+          const endAt = lastAt > act.startedAt ? lastAt + 60000 : act.startedAt + 60 * 60000;
+          const label = (findDay(act.dayId) || {}).label || "";
+          setSheet({
+            title: `Your ${label} workout is still open`,
+            message: logged
+              ? `Started ${ago(act.startedAt)}, with ${logged} set${logged === 1 ? "" : "s"} logged. Save them to history?`
+              : `Started ${ago(act.startedAt)} with nothing logged.`,
+            actions: [
+              ...(logged ? [{ label: `Save ${logged} logged set${logged === 1 ? "" : "s"}`, icon: Check, fn: () => { setSheet(null); completeWorkout(act, endAt, workouts); } }] : []),
+              { label: "Discard it", icon: Trash2, variant: "danger", fn: () => { setSheet(null); setActive(null); clearActiveStorage(); } },
+              { label: "Keep it open", variant: "cancel", fn: () => setSheet(null) },
+            ],
+          });
+        }
       })
       .catch(err => { console.error("Load failed:", err); })
       .finally(() => { if (mounted) setLoading(false); });
@@ -1704,8 +2001,19 @@ export default function App() {
     };
   }, [active]);
 
-  const goTab = t => { setTab(t); setScreen(t); window.scrollTo(0, 0); };
-  const goBack = () => { setScreen(tab); window.scrollTo(0, 0); };
+  // Each tab remembers its scroll position; tapping the tab you're on scrolls to top
+  const restoreScroll = y => requestAnimationFrame(() => window.scrollTo(0, y || 0));
+  const saveTabScroll = () => { if (screen === tab) scrollPos.current[tab] = window.scrollY; };
+  const goTab = t => {
+    if (t === screen) { window.scrollTo({ top: 0, behavior: "smooth" }); return; }
+    saveTabScroll();
+    setTab(t);
+    setScreen(t);
+    restoreScroll(scrollPos.current[t]);
+  };
+  const goBack = () => { setScreen(tab); restoreScroll(scrollPos.current[tab]); };
+  // Leave a tab for a deeper screen, remembering where you were
+  const openScreen = to => { saveTabScroll(); setScreen(to); window.scrollTo(0, 0); };
   const showSheet = cfg => setSheet(cfg);
   const closeSheet = () => setSheet(null);
 
@@ -1738,8 +2046,7 @@ export default function App() {
       };
       setRest(null);
       setActive(w);
-      setScreen("workout");
-      window.scrollTo(0, 0);
+      openScreen("workout");
       await clearActiveStorage();
       await persistActive(w);
     };
@@ -1749,7 +2056,7 @@ export default function App() {
         title: "Workout in progress",
         message: `Your ${(findDay(active.dayId) || {}).label || ""} session is still open. Starting a new one deletes it.`,
         actions: [
-          { label: "Resume workout", icon: ArrowRight, fn: () => { closeSheet(); setScreen("workout"); } },
+          { label: "Resume workout", icon: ArrowRight, fn: () => { closeSheet(); openScreen("workout"); } },
           { label: "Discard it and start new", icon: Trash2, variant: "danger", fn: () => { closeSheet(); createAndStart(); } },
           { label: "Cancel", variant: "cancel", fn: closeSheet },
         ],
@@ -1764,31 +2071,32 @@ export default function App() {
     saveActiveWithDebounce(next, isStructural);
   }
 
+  // Save a workout's logged sets to history and show the summary
+  function completeWorkout(w, endAt, hist) {
+    const completed = {
+      ...w,
+      completedAt: endAt,
+      bodyweight: bodyweight || CURRENT_BW || null,
+      exercises: w.exercises
+        .map(ex => ({ ...ex, sets: ex.sets.filter(s => s.done) }))
+        .filter(ex => ex.sets.length > 0),
+    };
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
+    const newList = [completed, ...hist.filter(x => x.id !== completed.id)].sort((x, y) => y.startedAt - x.startedAt);
+    saveWorkouts(newList);
+    clearActiveStorage();
+    const newPRs = detectSessionPRs(completed, hist);
+    setRest(null);
+    setActive(null);
+    setHistory(newList);
+    setSummary({ workout: completed, newPRs });
+  }
+
   async function finishWorkout() {
     if (!active) return;
     const hasDone = active.exercises.some(ex => ex.sets.some(s => s.done));
 
-    const doFinish = async () => {
-      const completed = {
-        ...active,
-        completedAt: Date.now(),
-        bodyweight: bodyweight || null,
-        exercises: active.exercises
-          .map(ex => ({ ...ex, sets: ex.sets.filter(s => s.done) }))
-          .filter(ex => ex.sets.length > 0),
-      };
-      if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
-      const newList = [completed, ...history.filter(w => w.id !== completed.id)];
-      saveWorkouts(newList);
-      clearActiveStorage();
-
-      const newPRs = detectSessionPRs(completed, history);
-
-      setRest(null);
-      setActive(null);
-      setHistory(newList);
-      setSummary({ workout: completed, newPRs });
-    };
+    const doFinish = async () => completeWorkout(active, Date.now(), history);
 
     if (!hasDone) {
       showSheet({
@@ -1990,7 +2298,9 @@ export default function App() {
     return (
       <div style={{ minHeight: "100vh", background: c.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
         <GlobalCSS />
-        <span style={{ fontSize: 14, color: c.ink3 }}>Loading</span>
+        <div className="live-dot" aria-label="Loading" style={{ width: 44, height: 44, borderRadius: 99, background: c.inset, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ width: 12, height: 12, borderRadius: 99, background: c.ink4 }} />
+        </div>
       </div>
     );
   }
@@ -2005,28 +2315,37 @@ export default function App() {
             target={target}
             onTargetChange={updateTarget}
             onStart={startWorkout}
-            onResume={() => { setScreen("workout"); window.scrollTo(0, 0); }}
+            onResume={() => openScreen("workout")}
+            onOpenSetup={() => openScreen("setup")}
           />
     );
     if (t === "history") return (
-          <HistoryScreen history={history} target={target} onOpen={w => { setDetailWorkout(w); setScreen("detail"); window.scrollTo(0, 0); }} />
+          <HistoryScreen history={history} target={target} onOpen={w => { setDetailWorkout(w); openScreen("detail"); }} />
     );
-    return (
-          <ProgressScreen
-            history={history}
-            bodyweight={bodyweight}
-            onBodyweightChange={updateBodyweight}
-            themePref={themePref}
-            onThemeChange={updateThemePref}
-            onExportClaude={exportForClaude}
-            onCopyClaude={copyAllForClaude}
-            onExportExcel={() => exportToExcel(history)}
-            onBackup={() => exportBackup(history)}
-            onRestore={handleRestore}
-            onEditRoutine={dayId => { setRoutineDay(dayId); setScreen("routine"); window.scrollTo(0, 0); }}
-            routineVersion={routineVersion}
-          />
-    );
+    return <ProgressScreen history={history} onOpenExercise={openExercise} />;
+  };
+
+  const setupEl = (
+    <SetupScreen
+      onBack={goBack}
+      history={history}
+      bodyweight={bodyweight}
+      onBodyweightChange={updateBodyweight}
+      themePref={themePref}
+      onThemeChange={updateThemePref}
+      onExportClaude={exportForClaude}
+      onCopyClaude={copyAllForClaude}
+      onExportExcel={() => exportToExcel(history)}
+      onBackup={() => exportBackup(history)}
+      onRestore={handleRestore}
+      daysSince={daysSinceBackup()}
+      onEditRoutine={dayId => { setRoutineDay(dayId); setScreen("routine"); window.scrollTo(0, 0); }}
+    />
+  );
+  // Where "back" goes: the routine editor returns to Setup, everything else to its tab
+  const backFromHere = () => {
+    if (screen === "routine") { setScreen("setup"); window.scrollTo(0, 0); }
+    else goBack();
   };
 
   return (
@@ -2038,8 +2357,9 @@ export default function App() {
         </div>
       ) : (
         <SwipeBack
+          key={screen}
           underRef={underRef}
-          onBack={() => { setNoEnter(true); goBack(); setTimeout(() => setNoEnter(false), 450); }}
+          onBack={() => { setNoEnter(true); backFromHere(); setTimeout(() => setNoEnter(false), 450); }}
         >
           <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh" }}>
         {screen === "workout" && active ? (
@@ -2079,8 +2399,12 @@ export default function App() {
                   { label: "Cancel", variant: "cancel", fn: closeSheet },
                 ],
               })}
-              onBack={goBack}
+              onBack={backFromHere}
             />
+          ) : null}
+          {screen === "setup" ? setupEl : null}
+          {screen === "exercise" && exerciseName ? (
+            <ExerciseScreen key={exerciseName} name={exerciseName} history={history} onBack={goBack} />
           ) : null}
           </div>
         </SwipeBack>
@@ -2088,12 +2412,15 @@ export default function App() {
 
       {!isTab ? (
         // Pre-rendered, hidden screen to reveal while swiping back
-        <div ref={underRef} aria-hidden="true" className="no-enter" style={{
+        <div key={`under-${screen}`} ref={underRef} aria-hidden="true" className="no-enter" style={{
           position: "fixed", inset: 0, zIndex: 0, overflow: "hidden",
           background: c.bg, pointerEvents: "none", visibility: "hidden",
         }}>
-          <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", paddingBottom: 120 }}>{tabEl(tab)}</div>
-          <BottomNav tab={tab} onSwitch={() => {}} />
+          <div style={{
+            maxWidth: 480, margin: "0 auto", minHeight: "100vh", paddingBottom: 120,
+            transform: screen === "routine" ? "none" : `translateY(${-(scrollPos.current[tab] || 0)}px)`,
+          }}>{screen === "routine" ? setupEl : tabEl(tab)}</div>
+          {screen === "routine" ? null : <BottomNav tab={tab} onSwitch={() => {}} />}
           <div data-dim style={{ position: "absolute", inset: 0, background: "#000", opacity: 0 }} />
         </div>
       ) : null}
@@ -2299,7 +2626,143 @@ function SwipeBack({ onBack, underRef, children }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // HOME
 // ═══════════════════════════════════════════════════════════════════════════
-function HomeScreen({ history, active, target, onTargetChange, onStart, onResume }) {
+// One card at a time on Today, picked by what matters most right now:
+// Monday recap → done-for-today wrap-up → today's targets (with PRs on the
+// table, and a streak nudge when the week is at risk) → first-run guide.
+function ContextCard({ history, active, hero, target, onStart }) {
+  const [dismissed, setDismissed] = useState(SETTINGS.recapSeen);
+  const [tipOff, setTipOff] = useState(!!SETTINGS.tipDismissed);
+  const lastMon = addDays(mondayOf(Date.now()), -7);
+  const weekKey = `w${lastMon.getTime()}`;
+  const recap = useMemo(() => weekRecap(history, lastMon), [history, weekKey]);
+  const milestone = useMemo(() => nextMilestone(history), [history]);
+  const targets = useMemo(() => todayTargets(history, hero), [history, hero.id]);
+  const risk = streakAtRisk(history, target);
+  const todays = history.filter(w => mondayOfDay(w.startedAt) === mondayOfDay(Date.now()));
+  const dow = new Date().getDay();
+
+  const shell = (children, { onClose, onPress } = {}) => {
+    const body = (
+      <>
+        {onClose ? (
+          <IconButton label="Dismiss" onClick={e => { e.stopPropagation(); onClose(); }} style={{ position: "absolute", top: 8, right: 8, color: c.ink3 }}><X size={18} /></IconButton>
+        ) : null}
+        {children}
+      </>
+    );
+    const style = { padding: "18px 18px 16px", marginTop: 14, borderRadius: 26, position: "relative", width: "100%", textAlign: "left", display: "block" };
+    return onPress
+      ? <div role="button" tabIndex={0} onClick={onPress} onKeyDown={e => { if (e.key === "Enter") onPress(); }} className="card tap rise" style={{ ...style, cursor: "pointer" }}>{body}</div>
+      : <div className="card rise" style={style}>{body}</div>;
+  };
+  const footer = (icon, text, color) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, paddingTop: 12, borderTop: `1px solid ${c.lineSoft}`, fontSize: 14, fontWeight: 650, color }}>
+      {icon}<span>{text}</span>
+    </div>
+  );
+
+  if (active) return null;
+
+  // 1) Monday/Tuesday: last week's recap
+  if ((dow === 1 || dow === 2) && recap && dismissed !== weekKey && !todays.length) {
+    const close = () => { saveSettings({ recapSeen: weekKey }); setDismissed(weekKey); };
+    return shell(
+      <>
+        <div className="serif" style={{ fontSize: 18, color: c.ink2 }}>Last week</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 14 }}>
+          {recap.idxDelta !== null ? (
+            <Stat label="Strength" value={fmtPct(recap.idxDelta)} />
+          ) : <Stat label="Sessions" value={recap.sessions} />}
+          <Stat label="PRs" value={recap.prs} />
+          <Stat label="Beat last time" value={recap.beatPct !== null ? `${Math.round(recap.beatPct)}%` : "—"} />
+        </div>
+      </>,
+      { onClose: close }
+    );
+  }
+
+  // 2) Trained today: a short wrap-up, plus what's next to chase
+  if (todays.length) {
+    const w = todays[0];
+    const prior = history.filter(x => x.startedAt < w.startedAt);
+    const prs = detectSessionPRs(w, prior).length;
+    const vs = compareToLast(w, prior);
+    const day = findDay(w.dayId);
+    const bits = [];
+    if (prs) bits.push(`${prs} PR${prs === 1 ? "" : "s"}`);
+    if (vs && vs.compared) bits.push(`${vs.beat} of ${vs.compared} sets beat last time`);
+    return shell(
+      <>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 34, height: 34, borderRadius: 99, background: day ? day.color : c.good, color: day ? day.on : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Check size={18} strokeWidth={3} />
+          </div>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 800 }}>{day ? day.label : "Workout"} done today</div>
+            <div className="num" style={{ fontSize: 14, color: c.ink2, marginTop: 2 }}>{bits.length ? bits.join(", ") : `${workoutSets(w)} sets logged`}</div>
+          </div>
+        </div>
+        {milestone ? footer(<Trophy size={16} strokeWidth={2.4} />, milestone.text, c.good) : null}
+      </>
+    );
+  }
+
+  // 3) Today's targets: the hook
+  if (targets.rows.length) {
+    const n = targets.prCount;
+    return shell(
+      <>
+        <div style={{ fontSize: 13, fontWeight: 700, color: hero.ink }}>{hero.label} day</div>
+        <div style={{ fontSize: 21, fontWeight: 800, letterSpacing: "-0.02em", marginTop: 2 }}>
+          {n ? `${n} PR${n === 1 ? "" : "s"} on the table` : "Numbers to beat"}
+        </div>
+        <div style={{ marginTop: 12 }}>
+          {targets.rows.map((r, i) => (
+            <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 600, color: c.ink2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shortLiftName(r.name)}</span>
+              <span className="num" style={{ fontSize: 16, fontWeight: 800, flexShrink: 0 }}>{fmtSetShort(r.weight, r.bw)} × {r.reps}</span>
+              <span style={{ width: 78, flexShrink: 0, display: "flex", justifyContent: "flex-end" }}>
+                {r.kind ? (
+                  <span style={{ fontSize: 11, fontWeight: 800, color: c.good, background: a(c.good, 12), padding: "4px 7px", borderRadius: 7, whiteSpace: "nowrap" }}>{r.kind === "e1rm" ? "PR" : PR_SHORT[r.kind]}</span>
+                ) : null}
+              </span>
+            </div>
+          ))}
+        </div>
+        {risk
+          ? footer(<Flame size={16} strokeWidth={2.4} />, `${risk.need} more session${risk.need === 1 ? "" : "s"} this week keeps your ${risk.streak}-week streak`, c.caution)
+          : milestone
+            ? footer(<Trophy size={16} strokeWidth={2.4} />, milestone.text, c.good)
+            : null}
+      </>,
+      { onPress: () => onStart(hero.id) }
+    );
+  }
+
+  // 4) First run
+  if (!history.length && !tipOff) {
+    const close = () => { setTipOff(true); saveSettings({ tipDismissed: true }); };
+    return shell(
+      <>
+        <div className="serif" style={{ fontSize: 18, color: c.ink2 }}>How it works</div>
+        {[
+          ["Start", "Tap Start. Each set opens with last time's numbers filled in."],
+          ["Log", "Adjust with + and −, then Log set. The rest clock runs by itself."],
+          ["Beat it", "Next session suggests the rep or weight to beat, set by set."],
+        ].map(([k, v], i) => (
+          <div key={i} style={{ display: "flex", gap: 12, marginTop: 12 }}>
+            <span className="display num" style={{ fontSize: 22, color: hero.ink, minWidth: 16 }}>{i + 1}</span>
+            <div style={{ fontSize: 14, color: c.ink2, lineHeight: 1.45 }}><strong style={{ color: c.ink }}>{k}.</strong> {v}</div>
+          </div>
+        ))}
+      </>,
+      { onClose: close }
+    );
+  }
+  return null;
+}
+
+function HomeScreen({ history, active, target, onTargetChange, onStart, onResume, onOpenSetup }) {
   const now = new Date();
   const mon = mondayOf(Date.now());
   const thisWeek = sessionsBetween(history, mon, addDays(mon, 7));
@@ -2309,21 +2772,6 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
   const hero = activeDay || nxt;
   const others = DAYS.filter(d => d.id !== hero.id);
 
-  // Monthly recap: first week of a new month, until dismissed
-  const [recapSeen, setRecapSeen] = useState(SETTINGS.recapSeen);
-  const [tipOff, setTipOff] = useState(!!SETTINGS.tipDismissed);
-  const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const recapKey = `${prevMonth.getFullYear()}-${prevMonth.getMonth() + 1}`;
-  const recap = useMemo(
-    () => monthRecap(history, prevMonth.getFullYear(), prevMonth.getMonth()),
-    [history, recapKey]
-  );
-  const showRecap = now.getDate() <= 7 && recap.sessions > 0 && recapSeen !== recapKey;
-  function dismissRecap() {
-    saveSettings({ recapSeen: recapKey });
-    setRecapSeen(recapKey);
-  }
-
   const todayIdx = (now.getDay() + 6) % 7;
   const week = Array.from({ length: 7 }, (_, i) => {
     const start = addDays(mon, i);
@@ -2332,13 +2780,20 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
   });
 
   const lastHero = history.find(w => w.dayId === hero.id);
-  const toBeat = active ? null : beatTarget(history, hero);
+  const toBeat = null; // targets now live in the Today card below
+  const sore = active ? null : readinessFor(history, hero);
   const typical = typicalDuration(history, hero.id);
   const activeDone = active ? active.exercises.reduce((s, e) => s + e.sets.filter(x => x.done).length, 0) : 0;
   const activeTotal = active ? active.exercises.reduce((s, e) => s + e.sets.length, 0) : 0;
 
   return (
-    <div className="rise" style={{ padding: `calc(env(safe-area-inset-top) + ${TOP_GAP + 12}px) 16px 0` }}>
+    <div className="rise" style={{ padding: `calc(env(safe-area-inset-top) + ${TOP_GAP + 4}px) 16px 0` }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 0 8px 6px" }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: c.ink3 }}>{fmtToday(Date.now())}</span>
+        <IconButton label="Setup" onClick={onOpenSetup} style={{ color: c.ink2, width: 40, height: 40 }}>
+          <Settings size={21} strokeWidth={2.1} />
+        </IconButton>
+      </div>
       {/* Hero: the next workout, colored like its plate */}
       <button
         onClick={active ? onResume : () => onStart(hero.id)}
@@ -2375,11 +2830,13 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
               {active ? (
                 <>
                   <div>{activeDone} of {activeTotal} sets logged</div>
-                  <div>Started {fmtDur(Date.now() - active.startedAt)} ago</div>
+                  <div>{Date.now() - active.startedAt > 4 * 3600000 ? `Started ${ago(active.startedAt)}` : `Started ${fmtDur(Date.now() - active.startedAt)} ago`}</div>
                 </>
               ) : (
                 <>
-                  <div>{lastHero ? `Last done ${ago(lastHero.startedAt)}` : "First one on the log"}</div>
+                  <div>{sore
+                    ? `${sore.m} trained ${sore.d === 0 ? "today" : "yesterday"}`
+                    : lastHero ? `Rested, last done ${ago(lastHero.startedAt)}` : "First one on the log"}</div>
                   <div>{hero.exercises.length} exercises{typical ? `, about ${fmtDur(typical)}` : ""}</div>
                 </>
               )}
@@ -2448,46 +2905,7 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
         </div>
       </div>
 
-      {showRecap ? (
-        <div className="card rise" style={{ padding: 20, position: "relative", marginTop: 14, borderRadius: 26 }}>
-          <IconButton label="Dismiss recap" onClick={dismissRecap} style={{ position: "absolute", top: 8, right: 8, color: c.ink3 }}>
-            <X size={18} />
-          </IconButton>
-          <div className="serif" style={{ fontSize: 18, color: c.ink2 }}>Your month</div>
-          <div className="display" style={{ fontSize: 40, marginTop: 4 }}>{recap.label}</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 18 }}>
-            <Stat label="Sessions" value={recap.sessions} />
-            <Stat label="Sets" value={recap.sets} />
-            <Stat label="Volume" value={fmtNum(recap.volume)} />
-            <Stat label="PRs" value={recap.prs.length} />
-          </div>
-          {recap.prs.length ? (
-            <p style={{ margin: "14px 0 0", fontSize: 14, color: c.ink2, lineHeight: 1.5 }}>
-              New bests on {recap.prs.slice(0, 3).map(p => p.name).join(", ")}
-              {recap.prs.length > 3 ? ` and ${recap.prs.length - 3} more` : ""}.
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {!history.length && !active && !tipOff ? (
-        <div className="card rise" style={{ padding: "18px 18px 16px", marginTop: 14, borderRadius: 26, position: "relative" }}>
-          <IconButton label="Dismiss" onClick={() => { setTipOff(true); saveSettings({ tipDismissed: true }); }} style={{ position: "absolute", top: 8, right: 8, color: c.ink3 }}>
-            <X size={18} />
-          </IconButton>
-          <div className="serif" style={{ fontSize: 18, color: c.ink2 }}>How it works</div>
-          {[
-            ["Start", "Tap Start. Each set opens with last time's numbers filled in."],
-            ["Log", "Adjust with + and −, then Log set. The rest clock runs by itself."],
-            ["Beat it", "Next session suggests the rep or weight to beat, set by set."],
-          ].map(([k, v], i) => (
-            <div key={i} style={{ display: "flex", gap: 12, marginTop: 12 }}>
-              <span className="display num" style={{ fontSize: 22, color: hero.ink, minWidth: 16 }}>{i + 1}</span>
-              <div style={{ fontSize: 14, color: c.ink2, lineHeight: 1.45 }}><strong style={{ color: c.ink }}>{k}.</strong> {v}</div>
-            </div>
-          ))}
-        </div>
-      ) : null}
+      <ContextCard history={history} active={active} hero={hero} target={target} onStart={onStart} />
 
       <h2 className="h-sec" style={{ fontSize: 22, margin: "30px 6px 14px" }}>Other days</h2>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -2689,6 +3107,13 @@ function WorkoutScreen({
   const [picker, setPicker] = useState(null);      // null | { mode: "add" } | { mode: "swap", ei }
   const [menu, setMenu] = useState(false);
   const [toast, setToast] = useState(null); // PR celebration
+  const [rirAsk, setRirAsk] = useState(null); // { ei, si } just logged, offer "left in the tank"
+  const [insight, setInsight] = useState(null); // exercise name for the history sheet
+  useEffect(() => {
+    if (!rirAsk) return;
+    const t = setTimeout(() => setRirAsk(null), 6000);
+    return () => clearTimeout(t);
+  }, [rirAsk]);
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 2800);
@@ -2781,7 +3206,7 @@ function WorkoutScreen({
     if (!ready) return;
     const next = mapEx(ei, e => ({
       ...e,
-      sets: e.sets.map((s, j) => j === si ? { ...s, done: true, weight: bw && s.weight === "" ? "0" : s.weight } : s),
+      sets: e.sets.map((s, j) => j === si ? { ...s, done: true, at: Date.now(), weight: bw && s.weight === "" ? "0" : s.weight } : s),
     }));
     // Carry the logged numbers forward into the next set if it's still empty
     const nextEx = next.exercises[ei];
@@ -2791,6 +3216,8 @@ function WorkoutScreen({
     }
     onUpdate(next, true);
     setActiveSet(prev => { const p = { ...prev }; delete p[ei]; return p; });
+
+    if (!set.warmup) setRirAsk({ ei, si, id: Date.now() });
 
     const kind = prKind(statsByName[ex.name], nextEx.sets[si], bw, bodyweight);
     if (kind) {
@@ -2809,6 +3236,10 @@ function WorkoutScreen({
       }
       setOpenIdx(target);
     }
+  }
+  function setRir(ei, si, v) {
+    onUpdate(mapEx(ei, ex => ({ ...ex, sets: ex.sets.map((s, j) => j === si ? { ...s, rir: v } : s) })), true);
+    setRirAsk(null);
   }
   function toggleWarmup(ei, si) {
     onUpdate(mapEx(ei, ex => ({ ...ex, sets: ex.sets.map((s, j) => j === si ? { ...s, warmup: !s.warmup } : s) })), true);
@@ -2943,6 +3374,9 @@ function WorkoutScreen({
                 onNoteChange={t => onNoteChange(ex.name, t)}
                 stats={statsByName[ex.name]}
                 onToggleWarmup={si => toggleWarmup(ei, si)}
+                rirAsk={rirAsk && rirAsk.ei === ei ? rirAsk.si : -1}
+                onRir={(si, v) => setRir(ei, si, v)}
+                onHistory={() => setInsight(ex.name)}
                 onSelectSet={si => setActiveSet(prev => ({ ...prev, [ei]: si }))}
                 onEditSet={(si, f, v) => editSet(ei, si, f, v)}
                 onLog={si => logSet(ei, si)}
@@ -3042,6 +3476,12 @@ function WorkoutScreen({
         />
       ) : null}
 
+      {insight ? (
+        <BottomSheet title={insight} onClose={() => setInsight(null)}>
+          <ExerciseInsight name={insight} history={history} compact />
+        </BottomSheet>
+      ) : null}
+
       {picker ? (
         <BottomSheet
           title={picker.mode === "swap" ? "Swap for today" : "Add exercise"}
@@ -3065,7 +3505,7 @@ function WorkoutScreen({
 
 function ExerciseCard({
   ex, bw, day, open, onToggle, current, lastSets, rec, step,
-  bodyweight, onBodyweightChange, note, onNoteChange, stats, onToggleWarmup,
+  bodyweight, onBodyweightChange, note, onNoteChange, stats, onToggleWarmup, rirAsk, onRir, onHistory,
   onSelectSet, onEditSet, onLog, onUndo, onRemoveSet, onAddSet, onFill, onSwap, onRemove,
 }) {
   const done = ex.sets.filter(s => s.done).length;
@@ -3186,19 +3626,25 @@ function ExerciseCard({
                 onRemove={() => onRemoveSet(si)}
               />
             ) : (
-              <SetLine
-                key={si} set={set} idx={si} bw={bw} day={day}
-                pr={set.done ? prKind(stats, set, bw, bodyweight) : null}
-                onSelect={() => onSelectSet(si)}
-              />
+              <div key={si}>
+                <SetLine
+                  set={set} idx={si} bw={bw} day={day}
+                  pr={set.done ? prKind(stats, set, bw, bodyweight) : null}
+                  onSelect={() => onSelectSet(si)}
+                />
+                {rirAsk === si && set.done ? <RirPrompt value={set.rir} onPick={v => onRir(si, v)} /> : null}
+              </div>
             ))}
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 18, padding: "10px 4px 0" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "10px 4px 0" }}>
             <button onClick={onAddSet} className="tap link"><Plus size={15} strokeWidth={2.4} /> Add set</button>
             <button onClick={onSwap} className="tap link"><Repeat size={14} strokeWidth={2.4} /> Swap</button>
+            <button onClick={onHistory} className="tap link"><TrendingUp size={14} strokeWidth={2.4} /> Trend</button>
             <span style={{ flex: 1 }} />
-            <button onClick={onRemove} className="tap link" style={{ color: c.ink3 }}>Remove</button>
+            <button onClick={onRemove} className="tap link" aria-label={`Remove ${ex.name} from this session`} style={{ color: c.ink3, padding: 8 }}>
+              <Trash2 size={16} strokeWidth={2.2} />
+            </button>
           </div>
         </div>
       </Collapse>
@@ -3229,6 +3675,28 @@ function Collapse({ open, children }) {
       transition: "grid-template-rows 300ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease",
     }}>
       <div style={{ overflow: "hidden", minHeight: 0 }}>{children}</div>
+    </div>
+  );
+}
+
+// Optional, one tap: how many reps were left after this set. Fades away if ignored.
+function RirPrompt({ value, onPick }) {
+  const opts = [{ v: 0, l: "Failure" }, { v: 1, l: "1" }, { v: 2, l: "2" }, { v: 3, l: "3+" }];
+  return (
+    <div className="rise" style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 10px 8px 52px" }}>
+      <span style={{ fontSize: 12, fontWeight: 650, color: c.ink3, marginRight: 2, whiteSpace: "nowrap" }}>Reps left</span>
+      {opts.map(o => (
+        <button
+          key={o.v}
+          onClick={() => onPick(o.v)}
+          className="tap num"
+          aria-pressed={value === o.v}
+          style={{
+            height: 30, padding: "0 10px", borderRadius: 99, fontSize: 12, fontWeight: 750,
+            background: value === o.v ? c.ink : c.inset, color: value === o.v ? c.bg : c.ink2,
+          }}
+        >{o.l}</button>
+      ))}
     </div>
   );
 }
@@ -3273,6 +3741,10 @@ function SetLine({ set, idx, bw, day, pr, onSelect }) {
         }}><Trophy size={12} strokeWidth={2.6} /> {PR_SHORT[pr]}</span>
       ) : wu ? (
         <span style={{ fontSize: 12, color: c.ink3, fontWeight: 600 }}>Warm-up</span>
+      ) : set.done && set.rir !== undefined && set.rir !== null ? (
+        <span style={{ fontSize: 12, color: c.ink3, fontWeight: 650 }}>
+          {Number(set.rir) === 0 ? "To failure" : `${set.rir === 3 ? "3+" : set.rir} left`}
+        </span>
       ) : null}
     </button>
   );
@@ -3319,9 +3791,9 @@ function ActiveSet({ set, idx, name, bw, step, day, prev, canRemove, onChange, o
 
   return (
     <div className="rise" style={{ background: c.inset, borderRadius: 18, padding: 12, margin: "2px 0" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 4px 10px" }}>
-        <span style={{ fontSize: 13, fontWeight: 750, color: c.ink2 }}>
-          {wu ? "Warm-up set" : `Set ${idx + 1}`}{set.done ? ", logged" : ""}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 4px 10px" }}>
+        <span style={{ fontSize: 13, fontWeight: 750, color: c.ink2, whiteSpace: "nowrap" }}>
+          {wu ? "Warm-up" : `Set ${idx + 1}`}{set.done ? ", logged" : ""}
         </span>
         <span style={{ flex: 1 }} />
         {barbell ? (
@@ -3342,7 +3814,7 @@ function ActiveSet({ set, idx, name, bw, step, day, prev, canRemove, onChange, o
           className="tap"
           aria-pressed={wu}
           style={{
-            fontSize: 12, fontWeight: 750, padding: "5px 10px", borderRadius: 99,
+            fontSize: 12, fontWeight: 750, padding: "5px 10px", borderRadius: 99, whiteSpace: "nowrap", flexShrink: 0,
             background: wu ? c.ink : "transparent",
             color: wu ? c.bg : c.ink3,
             boxShadow: wu ? "none" : `inset 0 0 0 1.5px ${c.line}`,
@@ -3471,12 +3943,15 @@ function BigStepper({ label, value, placeholder, bwStyle, inputMode, onDec, onIn
           <Minus size={18} strokeWidth={2.6} />
         </button>
         <input
-          type="number"
+          type="text"
           inputMode={inputMode}
+          enterKeyHint="done"
+          autoComplete="off"
           aria-label={label}
           value={value}
           placeholder={placeholder}
-          onChange={e => onChange(e.target.value)}
+          onChange={e => onChange(cleanNum(e.target.value, inputMode === "decimal"))}
+          onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
           onFocus={selectAll}
           onBlur={onBlur}
           className={`display num big-in${bwStyle ? " bw-input" : ""}`}
@@ -3505,14 +3980,14 @@ function BodyweightPrompt({ onSave }) {
         Add your bodyweight so these sets count toward volume.
       </div>
       <input
-        type="number"
+        type="text"
         inputMode="decimal"
         aria-label="Bodyweight in pounds"
         value={val}
         placeholder="lb"
-        onChange={e => setVal(e.target.value)}
+        onChange={e => setVal(cleanNum(e.target.value))}
         className="num"
-        style={{ width: 64, padding: "8px 6px", borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface, textAlign: "center", fontWeight: 700 }}
+        style={{ width: 68, padding: "8px 6px", borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface, textAlign: "center", fontSize: 16, fontWeight: 700 }}
       />
       <button
         onClick={() => valid && onSave(n)}
@@ -3602,7 +4077,7 @@ function NoteLine({ note, onSave }) {
           }}
           placeholder="Seat 4, back pad 2, neutral grip"
           aria-label="Setup note"
-          style={{ flex: 1, minWidth: 0, padding: "10px 12px", borderRadius: 12, border: `1.5px solid ${c.line}`, background: c.surface, fontSize: 15 }}
+          style={{ flex: 1, minWidth: 0, padding: "10px 12px", borderRadius: 12, border: `1.5px solid ${c.line}`, background: c.surface, fontSize: 16 }}
         />
       </div>
     );
@@ -4022,7 +4497,7 @@ function DetailScreen({ workout, history, onBack, onDelete, onEdit }) {
                       padding: "6px 10px", borderRadius: 10, background: c.inset,
                       fontSize: 15, fontWeight: 700, color: s.warmup ? c.ink3 : c.ink,
                     }}
-                  >{s.warmup ? "W " : ""}{fmtSetShort(s.weight === "" ? "0" : s.weight, bw)} × {s.reps || "—"}</button>
+                  >{s.warmup ? "W " : ""}{fmtSetShort(s.weight === "" ? "0" : s.weight, bw)} × {s.reps || "—"}{s.rir !== undefined && s.rir !== null ? <span style={{ color: c.ink4, fontWeight: 650 }}>{Number(s.rir) === 0 ? " F" : ` @${s.rir}`}</span> : null}</button>
                 ))}
                 <button
                   onClick={() => setEditing({ ei: i, si: -1 })}
@@ -4120,192 +4595,6 @@ function EditSetForm({ set, bw, isNew, canDelete, onSave, onDelete }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // PROGRESS
 // ═══════════════════════════════════════════════════════════════════════════
-function ProgressScreen({
-  history, bodyweight, onBodyweightChange, themePref, onThemeChange,
-  onExportClaude, onCopyClaude, onExportExcel, onBackup, onRestore, onEditRoutine, routineVersion,
-}) {
-  const [view, setView] = useState(() => ProgressScreen.lastView || "overview");
-  useEffect(() => { ProgressScreen.lastView = view; }, [view]);
-  const daysSince = daysSinceBackup();
-  const backupDue = history.length >= 3 && daysSince >= 30;
-
-  return (
-    <div className="rise">
-      <ScreenTitle title="Progress" />
-      <div style={{ padding: "0 20px 22px" }}>
-        <Segmented
-          value={view}
-          onChange={setView}
-          options={[{ value: "overview", label: "Overview" }, { value: "exercise", label: "Exercises" }, { value: "data", label: "Setup" }]}
-        />
-      </div>
-
-      {view !== "data" && backupDue ? (
-        <div style={{ padding: "0 20px 16px" }}>
-          <button
-            onClick={() => setView("data")}
-            className="tap"
-            style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 14, background: a(c.caution, 12), textAlign: "left" }}
-          >
-            <Shield size={18} color={c.caution} />
-            <span style={{ flex: 1, fontSize: 14, fontWeight: 600 }}>
-              {daysSince === Infinity ? "Your data isn't backed up yet" : `Last backup was ${daysSince} days ago`}
-            </span>
-            <ChevronRight size={18} color={c.ink3} />
-          </button>
-        </div>
-      ) : null}
-
-      {view === "overview" ? <OverviewView history={history} /> : null}
-      {view === "exercise" ? <ExerciseView history={history} /> : null}
-      {view === "data" ? (
-        <DataView
-          history={history}
-          bodyweight={bodyweight}
-          onBodyweightChange={onBodyweightChange}
-          themePref={themePref}
-          onThemeChange={onThemeChange}
-          onExportClaude={onExportClaude}
-          onCopyClaude={onCopyClaude}
-          onExportExcel={onExportExcel}
-          onBackup={onBackup}
-          onRestore={onRestore}
-          daysSince={daysSince}
-          onEditRoutine={onEditRoutine}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-function OverviewView({ history }) {
-  const weekly = useMemo(() => weeklyData(history, 12), [history]);
-  const prs = useMemo(() => computePRs(history), [history]);
-  const improvements = useMemo(() => {
-    const names = [];
-    const seen = new Set();
-    history.forEach(w => (w.exercises || []).forEach(e => { if (!seen.has(e.name)) { seen.add(e.name); names.push(e.name); } }));
-    return names.map(name => {
-      const ts = exerciseTimeSeries(history, name);
-      if (ts.length < 2) return null;
-      const first = ts[0], last = ts[ts.length - 1];
-      if (first.e1rm && last.e1rm) {
-        return { name, first: first.e1rm, last: last.e1rm, pct: (last.e1rm - first.e1rm) / first.e1rm * 100, est: true };
-      }
-      if (!first.top) return null;
-      return { name, first: first.top, last: last.top, pct: (last.top - first.top) / first.top * 100, est: false, bw: last.bw };
-    }).filter(x => x && x.pct >= 0.5).sort((x, y) => y.pct - x.pct).slice(0, 5);
-  }, [history]);
-
-  if (!history.length) {
-    return (
-      <div style={{ padding: "0 20px" }}>
-        <EmptyState icon={<BarChart3 size={20} />} title="No data yet" sub="Finish a workout and your trends start here." />
-      </div>
-    );
-  }
-
-  const totalV = history.reduce((s, w) => s + workoutVolume(w), 0);
-  const durs = history.filter(w => w.completedAt).map(w => w.completedAt - w.startedAt)
-    .filter(d => d > 5 * 60000 && d < 3 * 3600000).sort((x, y) => x - y);
-  const avgD = durs.length ? durs[Math.floor(durs.length / 2)] : 0;
-  const byDay = DAYS.map(d => ({ ...d, count: history.filter(w => w.dayId === d.id).length }));
-  const dayT = byDay.reduce((s, d) => s + d.count, 0);
-
-  return (
-    <div>
-      <MuscleSets history={history} />
-
-      <Section>
-        <div className="card" style={{ padding: 18, display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 20, columnGap: 12 }}>
-          <Stat label="Sessions" value={history.length} />
-          <Stat label="Total volume" value={fmtNum(totalV)} unit="lb" />
-          <Stat label="Per week, last 8" value={avgPerWeek(history)} />
-          <Stat label="Typical session" value={avgD ? fmtDur(avgD) : "—"} />
-        </div>
-      </Section>
-
-      <Section title="Sessions per week" aside="last 12 weeks">
-        <div className="card" style={{ padding: "16px 10px 8px" }}>
-          <ResponsiveContainer width="100%" height={130}>
-            <BarChart data={weekly} margin={{ top: 4, right: 6, left: -26, bottom: 0 }}>
-              <CartesianGrid stroke={CHART_HEX.grid} vertical={false} />
-              <XAxis dataKey="wk" tick={{ fill: CHART_HEX.muted, fontSize: 10 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-              <YAxis tick={{ fill: CHART_HEX.muted, fontSize: 10 }} axisLine={false} tickLine={false} allowDecimals={false} />
-              <Tooltip content={<ChartTip field="sessions" unit="sessions" />} cursor={{ fill: CHART_HEX.grid }} />
-              <Bar dataKey="sessions" radius={[4, 4, 0, 0]}>
-                {weekly.map((r, i) => <Cell key={i} fill={r.sessions > 0 ? CHART_HEX.ink : CHART_HEX.grid} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </Section>
-
-      <Section title="Weekly volume" aside="lb">
-        <AreaCard data={weekly} field="vol" unit="lb" tf={fmtNum} />
-      </Section>
-
-      <Section title="Split">
-        <div className="card" style={{ padding: 18 }}>
-          <div style={{ height: 10, borderRadius: 5, overflow: "hidden", display: "flex", gap: 2, background: c.inset }}>
-            {byDay.map(d => (
-              <div key={d.id} style={{ width: dayT ? `${(d.count / dayT) * 100}%` : "0%", background: d.color }} />
-            ))}
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 16 }}>
-            {byDay.map(d => (
-              <div key={d.id}>
-                <div className="display num" style={{ fontSize: 30 }}>{d.count}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: 2, background: d.color }} />
-                  <span style={{ fontSize: 13, color: c.ink3 }}>{d.label}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </Section>
-
-      {improvements.length > 0 ? (
-        <Section title="Most improved" aside="est. 1RM, first to latest">
-          <div className="card" style={{ overflow: "hidden" }}>
-            {improvements.map((imp, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}>
-                <span className="display num" style={{ fontSize: 22, color: c.good, minWidth: 56 }}>+{imp.pct.toFixed(imp.pct < 10 ? 1 : 0)}%</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 15, fontWeight: 650, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{imp.name}</div>
-                  <div className="num" style={{ fontSize: 13, color: c.ink3, marginTop: 1 }}>
-                    {imp.est ? `${imp.first} to ${imp.last} lb est. 1RM` : `${fmtLoadText(imp.first, imp.bw)} to ${fmtLoadText(imp.last, imp.bw)}`}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </Section>
-      ) : null}
-
-      {prs.length > 0 ? (
-        <Section title="Personal records">
-          <div className="card" style={{ overflow: "hidden" }}>
-            {[...prs].sort((x, y) => y.date - x.date).slice(0, 10).map((pr, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 15, fontWeight: 650, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pr.name}</div>
-                  <div style={{ fontSize: 13, color: c.ink3, marginTop: 1 }}>Set {ago(pr.date)}</div>
-                </div>
-                <div className="num" style={{ textAlign: "right", flexShrink: 0 }}>
-                  <div style={{ fontSize: 16, fontWeight: 750 }}><LoadText weight={pr.top} bw={pr.bw} /></div>
-                  <div style={{ fontSize: 12, color: c.ink3 }}>{pr.reps} reps{pr.e1rm ? `, est. 1RM ${pr.e1rm}` : ""}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </Section>
-      ) : null}
-    </div>
-  );
-}
-
 // Direct sets per muscle, this week or last, against a 10–20 weekly range
 function MuscleSets({ history }) {
   const [which, setWhich] = useState("this");
@@ -4357,112 +4646,6 @@ function MuscleSets({ history }) {
         </p>
       </div>
     </Section>
-  );
-}
-
-function ExerciseView({ history }) {
-  const routineNames = useMemo(() => new Set(DAYS.flatMap(d => d.exercises.map(e => e.name))), []);
-  const otherNames = useMemo(() => {
-    const s = new Set();
-    history.forEach(w => (w.exercises || []).forEach(e => { if (!routineNames.has(e.name)) s.add(e.name); }));
-    return Array.from(s).sort();
-  }, [history, routineNames]);
-  const [ex, setEx] = useState(() => ExerciseView.last || DAYS[0].exercises[0].name);
-  const [picking, setPicking] = useState(false);
-  useEffect(() => { ExerciseView.last = ex; }, [ex]);
-  const exDay = DAYS.find(d => d.exercises.some(e => e.name === ex));
-  const lineColor = exDay ? CHART_HEX[exDay.id] : CHART_HEX.ink;
-  const series = useMemo(() => exerciseTimeSeries(history, ex), [history, ex]);
-  const isBW = series.length ? series[series.length - 1].bw : isBodyweight(ex);
-  const best = series.length ? series.reduce((b, s) => (s.top > b.top || (s.top === b.top && s.topReps > b.topReps)) ? s : b, series[0]) : null;
-  const latest = series.length ? series[series.length - 1] : null;
-  const hasE = series.length && series.every(s => s.e1rm);
-  const bestE = hasE ? Math.max(...series.map(s => s.e1rm)) : 0;
-  const eDelta = hasE && series.length >= 2 ? latest.e1rm - series[0].e1rm : 0;
-  const delta = series.length >= 2 ? latest.top - series[0].top : 0;
-  const rec = recommendNextSet(history, ex, (DAYS.flatMap(d => d.exercises).find(e => e.name === ex) || {}).reps || "8–12", isBW);
-
-  return (
-    <div>
-      <Section>
-        <button
-          onClick={() => setPicking(true)}
-          className="card tap"
-          style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", textAlign: "left" }}
-        >
-          {exDay ? <MiniPlate color={exDay.color} on={exDay.on} size={34} /> : <div style={{ width: 34, height: 34, borderRadius: 99, background: c.inset }} />}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 12, fontWeight: 650, color: c.ink3 }}>{exDay ? `${exDay.label} day` : "No longer in routine"}</div>
-            <div style={{ fontSize: 17, fontWeight: 750, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ex}</div>
-          </div>
-          <span style={{ fontSize: 14, fontWeight: 650, color: c.ink2 }}>Change</span>
-        </button>
-      </Section>
-
-      {!series.length ? (
-        <div style={{ padding: "0 20px" }}>
-          <EmptyState icon={<Activity size={20} />} title="No sets logged yet" sub="Log this exercise once and its trend appears here." />
-        </div>
-      ) : (
-        <>
-          <Section>
-            <div className="card" style={{ padding: 18, display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 20, columnGap: 12 }}>
-              <Stat label="Latest top set" value={`${fmtSetShort(latest.top, isBW)}×${latest.topReps}`} />
-              {hasE ? (
-                <>
-                  <Stat label="Est. 1RM now" value={latest.e1rm} unit="lb" />
-                  <Stat label="Best est. 1RM" value={bestE} unit="lb" />
-                  <Stat label="Est. 1RM change" value={eDelta === 0 ? "0" : `${eDelta > 0 ? "+" : ""}${eDelta}`} unit="lb" />
-                </>
-              ) : (
-                <>
-                  <Stat label="Best" value={`${fmtSetShort(best.top, isBW)}×${best.topReps}`} />
-                  <Stat label={isBW ? "Added weight change" : "Weight change"} value={delta === 0 ? "0" : `${delta > 0 ? "+" : ""}${delta}`} unit="lb" />
-                </>
-              )}
-              {hasE ? null : <Stat label="Sessions" value={series.length} />}
-            </div>
-            {rec ? (
-              <div style={{ marginTop: 10, padding: "12px 14px", borderRadius: 14, background: a(c.good, 10), display: "flex", alignItems: "center", gap: 10 }}>
-                <TrendingUp size={17} color={c.good} strokeWidth={2.4} />
-                <span style={{ fontSize: 14, color: c.ink2 }}>
-                  Next time, try <strong className="num" style={{ color: c.ink }}>{fmtSetShort(rec.weight, isBW)} × {rec.reps}</strong>
-                </span>
-              </div>
-            ) : null}
-          </Section>
-          <Section title={hasE ? "Estimated 1RM" : isBW ? "Added weight" : "Top weight"} aside={hasE ? "Epley, best set each session" : "lb"}>
-            <AreaCard data={series} field={hasE ? "e1rm" : "top"} unit="lb" height={170} color={lineColor} />
-          </Section>
-          <Section title="Volume" aside={isBW ? "(bodyweight + added) × reps" : "weight × reps"}>
-            <AreaCard data={series} field="vol" unit="lb" height={150} tf={fmtNum} accent />
-          </Section>
-          <Section title="Recent sessions">
-            <div className="card" style={{ overflow: "hidden" }}>
-              {[...series].reverse().slice(0, 10).map((r, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}>
-                  <span style={{ fontSize: 14, color: c.ink2 }}>
-                    {new Date(r.date).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
-                  </span>
-                  <span className="num" style={{ fontSize: 15, fontWeight: 750 }}>
-                    <LoadText weight={r.top} bw={r.bw} /> × {r.topReps}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </Section>
-        </>
-      )}
-      {picking ? (
-        <ExerciseListSheet
-          current={ex}
-          otherNames={otherNames}
-          history={history}
-          onPick={n => { setEx(n); setPicking(false); }}
-          onClose={() => setPicking(false)}
-        />
-      ) : null}
-    </div>
   );
 }
 
@@ -4622,12 +4805,12 @@ function DataView({
               <div style={{ fontSize: 13, color: c.ink3, marginTop: 1 }}>Used for pull-up volume</div>
             </div>
             <input
-              type="number"
+              type="text"
               inputMode="decimal"
               aria-label="Bodyweight in pounds"
               value={bwVal}
               placeholder="—"
-              onChange={e => setBwVal(e.target.value)}
+              onChange={e => setBwVal(cleanNum(e.target.value))}
               onBlur={commitBw}
               onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
               className="num"
@@ -4675,47 +4858,6 @@ function DataView({
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CHARTS
-// ═══════════════════════════════════════════════════════════════════════════
-function AreaCard({ data, field, unit, height = 160, tf, accent, color: override }) {
-  const color = override || (accent ? CHART_HEX.accent : CHART_HEX.ink);
-  const gid = `grad_${field}_${String(color).replace("#", "")}`;
-  const xKey = data[0] && data[0].label !== undefined ? "label" : "wk";
-  return (
-    <div className="card" style={{ padding: "16px 10px 8px 12px" }}>
-      <ResponsiveContainer width="100%" height={height}>
-        <AreaChart data={data} margin={{ top: 6, right: 8, left: -10, bottom: 0 }}>
-          <defs>
-            <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={color} stopOpacity={0.18} />
-              <stop offset="100%" stopColor={color} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid stroke={CHART_HEX.grid} vertical={false} />
-          <XAxis dataKey={xKey} tick={{ fill: CHART_HEX.muted, fontSize: 10 }} axisLine={false} tickLine={false} />
-          <YAxis tick={{ fill: CHART_HEX.muted, fontSize: 10 }} axisLine={false} tickLine={false} width={38} tickFormatter={tf} />
-          <Tooltip content={<ChartTip field={field} unit={unit} />} cursor={{ stroke: CHART_HEX.muted, strokeDasharray: "2 3" }} />
-          <Area type="monotone" dataKey={field} stroke={color} strokeWidth={2.2} fill={`url(#${gid})`} dot={{ fill: color, r: 3, strokeWidth: 0 }} activeDot={{ r: 5, strokeWidth: 0 }} />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function ChartTip({ active, payload, field, unit }) {
-  if (!active || !payload || !payload.length) return null;
-  const r = payload[0].payload;
-  const label = r.label !== undefined ? r.label : r.wk;
-  return (
-    <div style={{ background: CHART_HEX.tip, border: `1px solid ${CHART_HEX.tipLine}`, borderRadius: 10, padding: "8px 12px", boxShadow: "0 4px 14px rgba(0,0,0,0.12)" }}>
-      <div style={{ fontSize: 11, color: CHART_HEX.muted }}>{label}</div>
-      <div className="num" style={{ fontSize: 15, fontWeight: 750, color: CHART_HEX.ink }}>
-        {fmtNum(r[field])} <span style={{ fontSize: 11, color: CHART_HEX.muted }}>{unit}</span>
-      </div>
-    </div>
-  );
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TRAINING GRID — last 12 weeks, one square per day; tap a day to open it
@@ -4969,6 +5111,453 @@ function RoutineRow({ ex, idx, last, day, open, onToggle, onUpdate, onRename, on
           </div>
         </div>
       </Collapse>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LIGHTWEIGHT CHARTS — plain SVG in the app's own colors
+// ═══════════════════════════════════════════════════════════════════════════
+function Sparkline({ values, color, width = 72, height = 26 }) {
+  if (!values || values.length < 2) return <div style={{ width, height }} />;
+  const min = Math.min(...values), max = Math.max(...values);
+  const span = max - min || 1;
+  const pts = values.map((v, i) => [
+    (i / (values.length - 1)) * (width - 4) + 2,
+    height - 3 - ((v - min) / span) * (height - 6),
+  ]);
+  const d = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" ");
+  const last = pts[pts.length - 1];
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true" style={{ flexShrink: 0, overflow: "visible" }}>
+      <path d={d} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={last[0]} cy={last[1]} r="2.8" fill={color} />
+    </svg>
+  );
+}
+
+// Line chart with optional reference line (e.g. 100 for the Strength Index)
+function LineChart({ points, color, height = 150, refY, format = v => Math.round(v), labelLast = true }) {
+  const ref = useRef(null);
+  const [w, setW] = useState(320);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setW(el.clientWidth || 320);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  if (!points || points.length < 2) return <div ref={ref} style={{ height }} />;
+  const pad = { l: 4, r: labelLast ? 44 : 6, t: 12, b: 20 };
+  const ys = points.map(p => p.v).concat(refY !== undefined ? [refY] : []);
+  let min = Math.min(...ys), max = Math.max(...ys);
+  const span0 = max - min || Math.max(1, Math.abs(max) * 0.05);
+  min -= span0 * 0.12; max += span0 * 0.12;
+  const X = i => pad.l + (i / (points.length - 1)) * (w - pad.l - pad.r);
+  const Y = v => pad.t + (1 - (v - min) / (max - min)) * (height - pad.t - pad.b);
+  const d = points.map((p, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(p.v).toFixed(1)}`).join(" ");
+  const area = `${d} L${X(points.length - 1).toFixed(1)} ${height - pad.b} L${X(0).toFixed(1)} ${height - pad.b} Z`;
+  const gid = `lc${String(color).replace(/[^a-z0-9]/gi, "")}`;
+  const lastP = points[points.length - 1];
+  const fmtT = t => new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return (
+    <div ref={ref} style={{ width: "100%" }}>
+      <svg width={w} height={height} role="img" aria-label={`Trend from ${format(points[0].v)} to ${format(lastP.v)}`}>
+        <defs>
+          <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity="0.22" />
+            <stop offset="100%" stopColor={color} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {refY !== undefined ? (
+          <line x1={pad.l} x2={w - pad.r} y1={Y(refY)} y2={Y(refY)} stroke={CHART_HEX.muted} strokeDasharray="3 4" strokeWidth="1" />
+        ) : null}
+        <path d={area} fill={`url(#${gid})`} />
+        <path d={d} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx={X(points.length - 1)} cy={Y(lastP.v)} r="4.5" fill={color} stroke={CHART_HEX.tip} strokeWidth="2" />
+        {labelLast ? (
+          <text x={X(points.length - 1) + 9} y={Y(lastP.v) + 4} fontSize="13" fontWeight="800" fill={CHART_HEX.ink} style={{ fontVariantNumeric: "tabular-nums" }}>
+            {format(lastP.v)}
+          </text>
+        ) : null}
+        <text x={pad.l} y={height - 4} fontSize="11" fill={CHART_HEX.muted}>{fmtT(points[0].t)}</text>
+        <text x={w - pad.r} y={height - 4} fontSize="11" fill={CHART_HEX.muted} textAnchor="end">{fmtT(lastP.t)}</text>
+      </svg>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROGRESS — Strength | Volume
+// ═══════════════════════════════════════════════════════════════════════════
+function ProgressScreen({ history, onOpenExercise }) {
+  const [view, setView] = useState(() => ProgressScreen.lastView || "strength");
+  useEffect(() => { ProgressScreen.lastView = view; }, [view]);
+  return (
+    <div className="rise">
+      <ScreenTitle title="Progress" />
+      <div style={{ padding: "0 20px 22px" }}>
+        <Segmented value={view} onChange={setView} options={[{ value: "strength", label: "Strength" }, { value: "volume", label: "Volume" }]} />
+      </div>
+      {!history.length ? (
+        <div style={{ padding: "0 20px" }}>
+          <EmptyState icon={<BarChart3 size={20} />} title="No data yet" sub="Finish a few workouts and your gains start showing here." />
+        </div>
+      ) : view === "strength" ? (
+        <StrengthView history={history} onOpenExercise={onOpenExercise} />
+      ) : (
+        <VolumeView history={history} />
+      )}
+    </div>
+  );
+}
+
+const STATUS_STYLE = {
+  up: { color: "var(--good)", label: "Progressing" },
+  flat: { color: "var(--ink-3)", label: "Holding" },
+  stalled: { color: "var(--caution)", label: "Stalled" },
+  new: { color: "var(--ink-4)", label: "Building data" },
+};
+
+function StrengthView({ history, onOpenExercise }) {
+  const idx = useMemo(() => strengthIndex(history, 12), [history]);
+  const lifts = useMemo(() => {
+    // Same 12-week window as the index, so the numbers agree with each other
+    const since = addDays(mondayOf(Date.now()), -7 * 11).getTime();
+    const windowed = history.filter(w => w.startedAt >= since);
+    const all = trackedLifts(windowed, 2).map(l => {
+      const st = liftStatus(l.series);
+      const ex = DAYS.flatMap(d => d.exercises).find(e => e.name === l.name) || {};
+      return { ...l, st, change: liftChange(l.series), goal: goalProgress(l.name, l.series, ex.reps, !!ex.bw) };
+    });
+    const rank = { stalled: 0, up: 1, flat: 2, new: 3 };
+    const main = new Set(idx && idx.lifts ? idx.lifts.map(l => l.name) : []);
+    return all.sort((x, y) =>
+      (main.has(y.name) - main.has(x.name)) || (rank[x.st.key] - rank[y.st.key])
+    ).map(l => ({ ...l, main: main.has(l.name) }));
+  }, [history, idx]);
+  const [showAll, setShowAll] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const mainCount = lifts.filter(l => l.main).length || Math.min(6, lifts.length);
+  const shown = showAll ? lifts : lifts.slice(0, mainCount);
+  const up = idx && idx.change >= 0;
+  const color = up ? CHART_HEX.accent : CHART_HEX.ink;
+
+  return (
+    <div>
+      {/* Hero: Strength Index */}
+      <Section>
+        <div className="card" style={{ padding: "18px 16px 10px" }}>
+          <div style={{ padding: "0 4px" }}>
+            <div style={{ fontSize: 14, fontWeight: 650, color: c.ink3 }}>Strength Index</div>
+            {idx && !idx.short ? (
+              <>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 6 }}>
+                  <span className="display num" style={{ fontSize: 56, color: up ? c.good : c.ink }}>
+                    {up ? "+" : ""}{idx.change.toFixed(1)}%
+                  </span>
+                </div>
+                <div style={{ fontSize: 14, color: c.ink2, marginTop: 8, lineHeight: 1.4 }}>
+                  Estimated 1RM across your {idx.lifts.length} main lift{idx.lifts.length === 1 ? "" : "s"}, last 12 weeks
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 15, color: c.ink2, marginTop: 8, lineHeight: 1.45 }}>
+                Log each main lift 3 times and your index starts here. It tracks the average estimated-1RM gain across them.
+              </div>
+            )}
+          </div>
+          {idx && !idx.short ? (
+            <div style={{ marginTop: 10 }}>
+              <LineChart points={idx.points} color={color} refY={100} format={v => Math.round(v)} height={140} />
+            </div>
+          ) : null}
+        </div>
+      </Section>
+
+      {/* Overload scoreboard */}
+      <Section title="Your lifts" aside="main lifts, stalled first">
+        <div className="card" style={{ overflow: "hidden" }}>
+          {shown.map((l, i) => {
+            const s = STATUS_STYLE[l.st.key];
+            const lineColor = l.day ? CHART_HEX[l.day.id] : CHART_HEX.ink;
+            const gl = goalLine(l.goal);
+            return (
+              <button
+                key={l.name}
+                onClick={() => onOpenExercise(l.name)}
+                className="tap"
+                style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", textAlign: "left", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shortLiftName(l.name)}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3, fontSize: 13, color: c.ink3, minWidth: 0 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 99, background: s.color, flexShrink: 0 }} />
+                    <span style={{ color: l.st.key === "stalled" ? c.caution : c.ink3, fontWeight: l.st.key === "stalled" ? 700 : 500, flexShrink: 0 }}>{s.label}</span>
+                    {gl ? <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>, {gl.replace(/^Goal /, "goal ")}</span> : null}
+                  </div>
+                </div>
+                <Sparkline values={smoothSeries(l.series.map(x => x.e1rm))} color={lineColor} />
+                <span className="num" style={{ minWidth: 54, textAlign: "right", fontSize: 15, fontWeight: 800, color: l.change > 0.5 ? c.good : l.change < -0.5 ? c.danger : c.ink3 }}>
+                  {fmtPct(l.change)}
+                </span>
+              </button>
+            );
+          })}
+          {lifts.length > mainCount ? (
+            <button onClick={() => setShowAll(!showAll)} className="tap" style={{ width: "100%", padding: "13px 16px", borderTop: `1px solid ${c.lineSoft}`, fontSize: 14, fontWeight: 700, color: c.ink2 }}>
+              {showAll ? "Main lifts only" : `Show ${lifts.length - mainCount} more lifts`}
+            </button>
+          ) : null}
+          <button onClick={() => setPicking(true)} className="tap" style={{ width: "100%", padding: "13px 16px", borderTop: `1px solid ${c.lineSoft}`, fontSize: 14, fontWeight: 700, color: c.ink2, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+            <Search size={15} strokeWidth={2.4} /> Any exercise
+          </button>
+        </div>
+        <p style={{ fontSize: 12, color: c.ink3, margin: "10px 4px 0", lineHeight: 1.45 }}>
+          Last 12 weeks. % is estimated 1RM, first 3 sessions vs last 3; lines are 3-session averages so one off day doesn't read as a drop.
+        </p>
+      </Section>
+
+      {picking ? (
+        <ExerciseListSheet
+          current={null}
+          otherNames={[]}
+          history={history}
+          onPick={n => { setPicking(false); onOpenExercise(n); }}
+          onClose={() => setPicking(false)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function VolumeView({ history }) {
+  const rates = useMemo(() => beatRateByWeek(history, 8), [history]);
+  const cur = rates[rates.length - 1];
+  const withData = rates.filter(r => r.pct !== null);
+  const headline = cur.pct !== null ? cur : withData[withData.length - 1];
+  const maxH = 110;
+  return (
+    <div>
+      <Section>
+        <div className="card" style={{ padding: 18 }}>
+          <div style={{ fontSize: 14, fontWeight: 650, color: c.ink3 }}>Sets that beat last time</div>
+          {headline ? (
+            <>
+              <div className="display num" style={{ fontSize: 52, marginTop: 6 }}>{Math.round(headline.pct)}%</div>
+              <div style={{ fontSize: 14, color: c.ink2, marginTop: 8, lineHeight: 1.45 }}>
+                {headline === cur ? "This week" : "Your latest week"}: {headline.beat} of {headline.n} sets added weight or reps.
+                {" "}30–50% is healthy double progression.
+              </div>
+              <div role="img" aria-label="Weekly share of sets that beat last time, last 8 weeks" style={{ position: "relative", display: "flex", alignItems: "flex-end", gap: 6, height: maxH, marginTop: 18 }}>
+                <div style={{ position: "absolute", left: 0, right: 0, bottom: maxH * 0.3, height: maxH * 0.2, background: a(c.good, 10), borderRadius: 4 }} />
+                {rates.map((r, i) => (
+                  <div key={r.t} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%", position: "relative" }}>
+                    <div style={{
+                      width: "100%", borderRadius: 6,
+                      height: r.pct === null ? 4 : Math.max(4, (Math.min(100, r.pct) / 100) * maxH),
+                      background: r.pct === null ? c.inset : i === rates.length - 1 ? c.good : a(c.good, 45),
+                    }} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11, color: c.ink3 }}>
+                <span>{fmtDate(rates[0].t)}</span><span>This week</span>
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 15, color: c.ink2, marginTop: 8 }}>Repeat a workout once and this starts counting.</div>
+          )}
+        </div>
+      </Section>
+      <MuscleSets history={history} />
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXERCISE INSIGHT — full screen from Progress, compact sheet mid-workout
+// ═══════════════════════════════════════════════════════════════════════════
+function ExerciseInsight({ name, history, compact, onGoalChange }) {
+  const routineEx = DAYS.flatMap(d => d.exercises).find(e => e.name === name) || {};
+  const day = DAYS.find(d => d.exercises.some(e => e.name === name));
+  const series = useMemo(() => exerciseTimeSeries(history, name), [history, name]);
+  const bw = series.length ? series[series.length - 1].bw : !!routineEx.bw || isBodyweight(name);
+  const hasE = series.length >= 2 && series.every(s => s.e1rm);
+  const lineColor = day ? CHART_HEX[day.id] : CHART_HEX.ink;
+  const rec = recommendNextSet(history, name, routineEx.reps || "8–12", bw);
+  const st = hasE ? liftStatus(series.filter(s => s.e1rm)) : null;
+  const gp = hasE ? goalProgress(name, series.filter(s => s.e1rm), routineEx.reps, bw) : null;
+  const [editGoal, setEditGoal] = useState(false);
+  const [goalVal, setGoalVal] = useState(goalFor(name) ? String(goalFor(name)) : "");
+  const prs = useMemo(() => computePRs(history).find(p => p.name === name), [history, name]);
+
+  // Recent sessions with RIR notes
+  const sessions = useMemo(() => {
+    const out = [];
+    for (const w of history) {
+      const ex = (w.exercises || []).find(e => e.name === name);
+      if (!ex) continue;
+      const work = ex.sets.filter(s => s.done && !s.warmup);
+      if (!work.length) continue;
+      out.push({ t: w.startedAt, sets: work });
+      if (out.length >= (compact ? 5 : 10)) break;
+    }
+    return out;
+  }, [history, name, compact]);
+
+  if (!series.length) {
+    return <EmptyState icon={<Activity size={20} />} title="No sets logged yet" sub="Log this exercise once and its trend appears here." />;
+  }
+  const latest = series[series.length - 1];
+  const first = series[0];
+  const eChange = hasE ? latest.e1rm - first.e1rm : 0;
+
+  // Stall advice uses RIR: at failure and not moving means back off; otherwise push harder
+  let stallTip = null;
+  if (st && st.key === "stalled") {
+    const recentRir = sessions.slice(0, 3).flatMap(s => s.sets.map(x => x.rir)).filter(x => x !== undefined && x !== null);
+    const atFailure = recentRir.length && recentRir.filter(x => Number(x) === 0).length >= recentRir.length / 2;
+    stallTip = atFailure
+      ? "No new best in 3 sessions and you're training to failure. Drop about 10% and rebuild over 2–3 sessions."
+      : "No new best in 3 sessions. Take the last set closer to failure, or drop about 10% and rebuild.";
+  }
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 18, columnGap: 12, marginBottom: 16 }}>
+        <Stat label="Latest top set" value={`${fmtSetShort(latest.top, bw)}×${latest.topReps}`} />
+        {hasE ? <Stat label="Est. 1RM now" value={latest.e1rm} unit="lb" /> : <Stat label="Sessions" value={series.length} />}
+        {hasE && !compact ? <Stat label="Est. 1RM change" value={`${eChange >= 0 ? "+" : ""}${eChange}`} unit="lb" /> : null}
+        {!compact ? <Stat label="Sessions" value={series.length} /> : null}
+      </div>
+
+      {st ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700, color: STATUS_STYLE[st.key].color, marginBottom: stallTip ? 6 : 12 }}>
+          <span style={{ width: 8, height: 8, borderRadius: 99, background: STATUS_STYLE[st.key].color }} /> {STATUS_STYLE[st.key].label}
+        </div>
+      ) : null}
+      {stallTip ? <p style={{ margin: "0 0 14px", fontSize: 14, color: c.ink2, lineHeight: 1.45 }}>{stallTip}</p> : null}
+
+      {series.length >= 2 ? (
+        <div className="card" style={{ padding: "12px 10px 6px", marginBottom: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 650, color: c.ink3, padding: "0 6px 6px" }}>{hasE ? "Estimated 1RM" : bw ? "Added weight" : "Top weight"}</div>
+          <LineChart points={series.map(s => ({ t: s.date, v: hasE ? s.e1rm : s.top }))} color={lineColor} height={compact ? 120 : 150} />
+        </div>
+      ) : null}
+
+      {rec ? (
+        <div style={{ padding: "12px 14px", borderRadius: 14, background: a(c.good, 10), display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+          <TrendingUp size={17} color={c.good} strokeWidth={2.4} />
+          <span style={{ fontSize: 14, color: c.ink2 }}>Next time, try <strong className="num" style={{ color: c.ink }}>{fmtSetShort(rec.weight, bw)} × {rec.reps}</strong></span>
+        </div>
+      ) : null}
+
+      {/* Goal */}
+      {!compact || goalFor(name) ? (
+        <div className="card" style={{ padding: "14px 16px", marginBottom: 12 }}>
+          {editGoal ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 14, fontWeight: 650, color: c.ink2 }}>{bw ? "Goal added lb" : "Goal weight"}</span>
+              <input
+                autoFocus type="text" inputMode="decimal" value={goalVal}
+                onChange={e => setGoalVal(cleanNum(e.target.value))}
+                aria-label="Goal weight in pounds"
+                className="num"
+                style={{ width: 80, height: 40, borderRadius: 10, border: `1.5px solid ${c.line}`, background: c.surface, textAlign: "center", fontSize: 16, fontWeight: 750 }}
+              />
+              <span style={{ fontSize: 14, color: c.ink3 }}>× {(parseRepTarget(routineEx.reps || "8–12") || { min: 8 }).min}</span>
+              <span style={{ flex: 1 }} />
+              <button onClick={() => { setGoal(name, Number(goalVal) > 0 ? goalVal : null); setEditGoal(false); onGoalChange && onGoalChange(); }} className="tap" style={{ height: 40, padding: "0 14px", borderRadius: 10, background: c.ink, color: c.bg, fontWeight: 750 }}>Save</button>
+            </div>
+          ) : (
+            <button onClick={() => setEditGoal(true)} className="tap" style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, textAlign: "left" }}>
+              <Trophy size={17} color={gp ? c.good : c.ink3} strokeWidth={2.3} />
+              <span style={{ flex: 1, fontSize: 14, fontWeight: 650, color: gp ? c.ink : c.ink2 }}>
+                {gp ? goalLine(gp) : "Set a goal and get a projected date"}
+              </span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: c.ink3 }}>{gp ? "Edit" : "Set"}</span>
+            </button>
+          )}
+        </div>
+      ) : null}
+
+      {!compact && prs ? (
+        <div className="card" style={{ padding: "14px 16px", marginBottom: 12, display: "flex", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: c.ink3, fontWeight: 650 }}>Heaviest</div>
+            <div className="num" style={{ fontSize: 16, fontWeight: 800, marginTop: 2 }}><LoadText weight={prs.top} bw={prs.bw} /> × {prs.reps}</div>
+          </div>
+          {prs.e1rm ? (
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, color: c.ink3, fontWeight: 650 }}>Best est. 1RM</div>
+              <div className="num" style={{ fontSize: 16, fontWeight: 800, marginTop: 2 }}>{prs.e1rm} lb</div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div style={{ fontSize: 13, fontWeight: 700, color: c.ink3, margin: "6px 2px 8px" }}>Recent sessions</div>
+      <div className="card" style={{ overflow: "hidden" }}>
+        {sessions.map((s, i) => (
+          <div key={s.t} style={{ display: "flex", alignItems: "baseline", gap: 12, padding: "11px 14px", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}>
+            <span style={{ fontSize: 13, color: c.ink3, width: 54, flexShrink: 0 }}>{fmtDate(s.t)}</span>
+            <span className="num" style={{ fontSize: 14, fontWeight: 650, color: c.ink2, display: "flex", flexWrap: "wrap", columnGap: 10 }}>
+              {s.sets.map((x, j) => (
+                <span key={j} style={{ whiteSpace: "nowrap" }}>
+                  {fmtSetShort(x.weight, bw)}×{x.reps}{x.rir !== undefined && x.rir !== null ? <span style={{ color: c.ink4, fontWeight: 600 }}>{Number(x.rir) === 0 ? " F" : ` @${x.rir}`}</span> : null}
+                </span>
+              ))}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ExerciseScreen({ name, history, onBack }) {
+  const day = DAYS.find(d => d.exercises.some(e => e.name === name));
+  const [, bump] = useState(0);
+  return (
+    <div className="fade-in" style={{ paddingBottom: 40 }}>
+      <header style={{
+        position: "sticky", top: 0, zIndex: 100, background: a(c.bg, 88),
+        backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+        padding: `calc(env(safe-area-inset-top) + ${TOP_GAP}px) 8px 4px`,
+      }}>
+        <IconButton label="Back" onClick={onBack}><ChevronLeft size={26} strokeWidth={2.2} /></IconButton>
+      </header>
+      <div style={{ padding: "0 20px 18px" }}>
+        {day ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700, color: day.ink }}>
+            <MiniPlate color={day.color} on={day.on} size={18} /> {day.label} day
+          </div>
+        ) : null}
+        <h1 className="display" style={{ margin: "8px 0 0", fontSize: 40, fontStretch: "88%" }}>{name}</h1>
+      </div>
+      <div style={{ padding: "0 20px" }}>
+        <ExerciseInsight name={name} history={history} onGoalChange={() => bump(x => x + 1)} />
+      </div>
+    </div>
+  );
+}
+
+function SetupScreen({ onBack, ...props }) {
+  return (
+    <div className="fade-in" style={{ paddingBottom: 40 }}>
+      <header style={{
+        position: "sticky", top: 0, zIndex: 100, background: a(c.bg, 88),
+        backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+        padding: `calc(env(safe-area-inset-top) + ${TOP_GAP}px) 8px 4px`,
+      }}>
+        <IconButton label="Back" onClick={onBack}><ChevronLeft size={26} strokeWidth={2.2} /></IconButton>
+      </header>
+      <div style={{ padding: "0 20px 20px" }}>
+        <h1 className="display" style={{ margin: 0, fontSize: 46 }}>Setup</h1>
+      </div>
+      <DataView {...props} />
     </div>
   );
 }
