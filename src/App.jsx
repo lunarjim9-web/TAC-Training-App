@@ -1388,30 +1388,45 @@ function liftChange(series) {
   return a ? ((b - a) / a) * 100 : 0;
 }
 
+// Which slice of history the Progress tab measures: the last 12 weeks when
+// there's enough there, otherwise everything since you started (so older
+// logs never leave the screen blank).
+function progressWindow(history, weeks = 12) {
+  const start12 = addDays(mondayOf(Date.now()), -7 * (weeks - 1));
+  const recent = history.filter(w => w.startedAt >= start12.getTime());
+  if (trackedLifts(recent, 2).length) {
+    return { list: recent, start: start12, label: `last ${weeks} weeks` };
+  }
+  if (!history.length) return { list: [], start: start12, label: "" };
+  const first = Math.min(...history.map(w => w.startedAt));
+  return { list: history, start: mondayOf(first), label: `since ${fmtDate(first)}` };
+}
+
 // Strength Index: average e1RM gain across your main lifts, 100 = where you started
 function strengthIndex(history, weeks = 12) {
-  const start = addDays(mondayOf(Date.now()), -7 * (weeks - 1));
-  const recentHistory = history.filter(w => w.startedAt >= start.getTime());
-  let lifts = trackedLifts(recentHistory, 3);
+  const win = progressWindow(history, weeks);
+  let lifts = trackedLifts(win.list, 2);
   if (lifts.length < 1) return null;
   lifts = lifts.slice(0, 6);
+  // Baseline and current: the first and last k sessions of each lift (k = up to 3)
+  const k = l => Math.min(3, Math.floor(l.series.length / 2) || 1);
+  const base = l => avg(l.series.slice(0, k(l)).map(s => s.e1rm));
+  const change = 100 * avg(lifts.map(l => avg(l.series.slice(-k(l)).map(s => s.e1rm)) / base(l))) - 100;
+  const nWeeks = Math.min(52, Math.max(1, Math.ceil((Date.now() - win.start.getTime()) / (7 * 86400000))));
   const points = [];
-  for (let i = 0; i < weeks; i++) {
-    const end = addDays(start, 7 * (i + 1)).getTime();
+  for (let i = 0; i < nWeeks; i++) {
+    const end = addDays(win.start, 7 * (i + 1)).getTime();
     const ratios = [];
     for (const l of lifts) {
       const upTo = l.series.filter(s => s.date < end).map(s => s.e1rm);
       if (!upTo.length) continue;
-      const base = avg(l.series.slice(0, 3).map(s => s.e1rm));
-      const cur = avg(upTo.slice(-3));
-      ratios.push(cur / base);
+      ratios.push(avg(upTo.slice(-k(l))) / base(l));
     }
-    if (ratios.length) points.push({ t: addDays(start, 7 * i).getTime(), v: 100 * avg(ratios) });
+    if (ratios.length) points.push({ t: addDays(win.start, 7 * i).getTime(), v: 100 * avg(ratios) });
   }
-  if (points.length < 2) return { points, change: 0, lifts, short: true };
-  const change = points[points.length - 1].v - 100;
-  const firstDate = Math.min(...lifts.map(l => l.series[0].date));
-  return { points, change, lifts, since: firstDate };
+  // Collapse runs of identical weeks so long gaps don't draw as flat plateaus
+  const compact = points.filter((p, i) => i === 0 || i === points.length - 1 || Math.abs(p.v - points[i - 1].v) > 1e-9);
+  return { points: compact, change, lifts, label: win.label, short: compact.length < 2 };
 }
 
 // Share of working sets that beat the same set from the previous session of that lift
@@ -2853,6 +2868,9 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
         </div>
       </button>
 
+      {/* What's at stake today, right under the day it's about */}
+      <ContextCard history={history} active={active} hero={hero} target={target} onStart={onStart} />
+
       {/* This week */}
       <div className="card" style={{ padding: "20px 18px 8px", marginTop: 14, borderRadius: 26 }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "0 4px" }}>
@@ -2904,8 +2922,6 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
           </div>
         </div>
       </div>
-
-      <ContextCard history={history} active={active} hero={hero} target={target} onStart={onStart} />
 
       <h2 className="h-sec" style={{ fontSize: 22, margin: "30px 6px 14px" }}>Other days</h2>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -3183,6 +3199,15 @@ function WorkoutScreen({
   const totalSets = workout.exercises.reduce((s, ex) => s + ex.sets.length, 0);
   const doneSets = workout.exercises.reduce((s, ex) => s + ex.sets.filter(x => x.done).length, 0);
   const allDone = totalSets > 0 && doneSets === totalSets;
+  // When the last set is logged, bring the Finish card into view
+  const doneRef = useRef(null);
+  const wasDone = useRef(allDone);
+  useEffect(() => {
+    if (allDone && !wasDone.current && doneRef.current) {
+      setTimeout(() => doneRef.current && doneRef.current.scrollIntoView({ behavior: "smooth", block: "center" }), 350);
+    }
+    wasDone.current = allDone;
+  }, [allDone]);
 
   const currentSetOf = ei => {
     const ex = workout.exercises[ei];
@@ -3226,7 +3251,8 @@ function WorkoutScreen({
     }
 
     const everything = next.exercises.every(isExerciseDone);
-    if (!everything && !set.warmup) onStartRest(parseRestSeconds(ex.rest), ex.name);
+    if (everything) onClearRest(); // last set: no rest, straight to Finish
+    else if (!set.warmup) onStartRest(parseRestSeconds(ex.rest), ex.name);
     if (isExerciseDone(nextEx)) {
       const n = next.exercises.length;
       let target = null;
@@ -3407,6 +3433,30 @@ function WorkoutScreen({
         >
           <Plus size={17} strokeWidth={2.4} /> Add exercise
         </button>
+
+        {allDone ? (
+          <div ref={doneRef} className="rise" style={{
+            marginTop: 16, padding: "20px 18px 18px", borderRadius: 24, textAlign: "center",
+            background: a(day.color, 10), border: `1.5px solid ${a(day.color, 35)}`,
+          }}>
+            <div className="pop" style={{
+              width: 48, height: 48, borderRadius: 99, margin: "0 auto",
+              background: day.color, color: day.on,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}><Check size={24} strokeWidth={3} /></div>
+            <div style={{ fontSize: 18, fontWeight: 800, marginTop: 12 }}>All {totalSets} sets logged</div>
+            <div style={{ fontSize: 14, color: c.ink2, marginTop: 4 }}>{fmtDur(elapsed)} of work. Wrap it up to see your PRs.</div>
+            <button
+              onClick={onFinish}
+              className="tap"
+              style={{
+                width: "100%", height: 56, marginTop: 16, borderRadius: 16,
+                background: day.color, color: day.on, fontSize: 17, fontWeight: 800,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              }}
+            ><Check size={20} strokeWidth={3} /> Finish workout</button>
+          </div>
+        ) : null}
       </div>
 
       {/* Bottom dock: rest countdown while resting, otherwise Finish */}
@@ -3419,7 +3469,7 @@ function WorkoutScreen({
         <div style={{ maxWidth: 448, margin: "0 auto" }}>
           {rest ? (
             <RestDock rest={rest} day={day} onAdjust={onAdjustRest} onClear={onClearRest} />
-          ) : (
+          ) : allDone ? null : (
             <button
               onClick={onFinish}
               className="tap"
@@ -4282,7 +4332,9 @@ function HistoryScreen({ history, target, onOpen }) {
         </div>
       ) : (
         <>
-          <TrainingGrid history={history} filter={filter} onOpen={onOpen} />
+          {history.some(w => w.startedAt >= addDays(mondayOf(Date.now()), -77).getTime()) ? (
+            <TrainingGrid history={history} filter={filter} onOpen={onOpen} />
+          ) : null}
 
           {!list.length ? (
             <div style={{ padding: "0 20px" }}>
@@ -4307,7 +4359,7 @@ function HistoryScreen({ history, target, onOpen }) {
                         onClick={() => setOpenMonths(o => ({ ...o, [m.key]: !o[m.key] }))}
                         className="tap"
                         aria-expanded={open}
-                        style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "15px 16px", textAlign: "left" }}
+                        style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "15px 16px", textAlign: "left", background: open ? c.inset : "transparent", transition: "background 200ms ease" }}
                       >
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 16, fontWeight: 750 }}>{m.label}</div>
@@ -4327,7 +4379,8 @@ function HistoryScreen({ history, target, onOpen }) {
                         <ChevronRight size={18} color={c.ink4} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform 200ms ease" }} />
                       </button>
                       <Collapse open={open}>
-                        <div style={{ padding: "0 0 6px" }}>
+                        {/* Recessed panel with white week cards, so the month reads as opened */}
+                        <div style={{ background: c.inset, padding: "4px 10px 12px", borderTop: `1px solid ${c.lineSoft}` }}>
                           {weekGroups(m.items).map(g => (
                             <WeekGroup key={g.start} group={g} target={filter === "all" ? target : null} meta={meta} onOpen={onOpen} nested />
                           ))}
@@ -4372,7 +4425,7 @@ function WeekGroup({ group, target, meta, onOpen, nested }) {
   const vol = group.items.reduce((s, w) => s + workoutVolume(w), 0);
   const hit = target && n >= target;
   const header = (
-    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, padding: nested ? "10px 16px 6px" : "0 4px 10px" }}>
+    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, padding: nested ? "8px 6px 8px" : "0 4px 10px" }}>
       <span style={{ fontSize: nested ? 14 : 17, fontWeight: nested ? 750 : 700, letterSpacing: "-0.01em", color: nested ? c.ink2 : c.ink }}>
         {weekLabel(group.start)}
       </span>
@@ -4389,7 +4442,14 @@ function WeekGroup({ group, target, meta, onOpen, nested }) {
   const rows = group.items.map((w, i) => (
     <SessionRow key={w.id} w={w} meta={meta.get(w.id)} first={i === 0} onOpen={onOpen} />
   ));
-  if (nested) return <div>{header}<div>{rows}</div></div>;
+  if (nested) {
+    return (
+      <div style={{ marginTop: 8 }}>
+        {header}
+        <div style={{ background: c.surface, borderRadius: 16, overflow: "hidden", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}>{rows}</div>
+      </div>
+    );
+  }
   return (
     <section style={{ padding: "0 20px", marginBottom: 24 }}>
       {header}
@@ -5223,10 +5283,9 @@ const STATUS_STYLE = {
 function StrengthView({ history, onOpenExercise }) {
   const idx = useMemo(() => strengthIndex(history, 12), [history]);
   const lifts = useMemo(() => {
-    // Same 12-week window as the index, so the numbers agree with each other
-    const since = addDays(mondayOf(Date.now()), -7 * 11).getTime();
-    const windowed = history.filter(w => w.startedAt >= since);
-    const all = trackedLifts(windowed, 2).map(l => {
+    // Same window as the index, so the numbers agree; lifts with one session show as "Building data"
+    const windowed = progressWindow(history, 12).list;
+    const all = trackedLifts(windowed, 1).map(l => {
       const st = liftStatus(l.series);
       const ex = DAYS.flatMap(d => d.exercises).find(e => e.name === l.name) || {};
       return { ...l, st, change: liftChange(l.series), goal: goalProgress(l.name, l.series, ex.reps, !!ex.bw) };
@@ -5251,20 +5310,20 @@ function StrengthView({ history, onOpenExercise }) {
         <div className="card" style={{ padding: "18px 16px 10px" }}>
           <div style={{ padding: "0 4px" }}>
             <div style={{ fontSize: 14, fontWeight: 650, color: c.ink3 }}>Strength Index</div>
-            {idx && !idx.short ? (
+            {idx ? (
               <>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 6 }}>
                   <span className="display num" style={{ fontSize: 56, color: up ? c.good : c.ink }}>
-                    {up ? "+" : ""}{idx.change.toFixed(1)}%
+                    {fmtPct(idx.change)}
                   </span>
                 </div>
                 <div style={{ fontSize: 14, color: c.ink2, marginTop: 8, lineHeight: 1.4 }}>
-                  Estimated 1RM across your {idx.lifts.length} main lift{idx.lifts.length === 1 ? "" : "s"}, last 12 weeks
+                  Estimated 1RM across your {idx.lifts.length} main lift{idx.lifts.length === 1 ? "" : "s"}, {idx.label}
                 </div>
               </>
             ) : (
               <div style={{ fontSize: 15, color: c.ink2, marginTop: 8, lineHeight: 1.45 }}>
-                Log each main lift 3 times and your index starts here. It tracks the average estimated-1RM gain across them.
+                Repeat any main lift once more and your index starts here. It tracks the average estimated-1RM gain across your main lifts.
               </div>
             )}
           </div>
@@ -5300,7 +5359,7 @@ function StrengthView({ history, onOpenExercise }) {
                 </div>
                 <Sparkline values={smoothSeries(l.series.map(x => x.e1rm))} color={lineColor} />
                 <span className="num" style={{ minWidth: 54, textAlign: "right", fontSize: 15, fontWeight: 800, color: l.change > 0.5 ? c.good : l.change < -0.5 ? c.danger : c.ink3 }}>
-                  {fmtPct(l.change)}
+                  {l.series.length < 2 ? "—" : fmtPct(l.change)}
                 </span>
               </button>
             );
@@ -5315,7 +5374,7 @@ function StrengthView({ history, onOpenExercise }) {
           </button>
         </div>
         <p style={{ fontSize: 12, color: c.ink3, margin: "10px 4px 0", lineHeight: 1.45 }}>
-          Last 12 weeks. % is estimated 1RM, first 3 sessions vs last 3; lines are 3-session averages so one off day doesn't read as a drop.
+          {progressWindow(history, 12).label.replace(/^./, ch => ch.toUpperCase())}. % is estimated 1RM, first sessions vs latest (up to 3 each); lines are 3-session averages so one off day doesn't read as a drop.
         </p>
       </Section>
 
