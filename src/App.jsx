@@ -514,46 +514,81 @@ function parseRepTarget(repsStr) {
   return null;
 }
 
-// Double progression. Load goes up only once EVERY set at the top load hit
-// the top of the rep range last time; until then, build reps.
-// Returns { increase, weight, reps, rationale } or null with no history.
-// For bodyweight exercises, `weight` is ADDED load (0 = bodyweight only).
-function recommendNextSet(history, exerciseName, targetRepsStr, bw) {
-  const all = findLastSessionSets(history, exerciseName);
-  const last = all ? all.filter(s => !s.warmup) : null;
-  if (!last || !last.length) return null;
-  const target = parseRepTarget(targetRepsStr);
-  const topW = Math.max(...last.map(s => Number(s.weight) || 0));
-  const atTop = last.filter(s => (Number(s.weight) || 0) === topW);
-  const minReps = Math.min(...atTop.map(s => Number(s.reps) || 0));
-  const increment = bw ? 5 : (isLowerBody(exerciseName) ? 10 : 5);
-  if (target && minReps >= target.max) {
-    return {
-      increase: true,
-      weight: String(topW + increment),
-      reps: String(target.min),
-      rationale: `+${increment} lb, every set hit ${target.max} last time`,
-    };
+// ═══════════════════════════════════════════════════════════════════════════
+// NEXT-SESSION TARGETS — one model used everywhere (Today card, Try chip,
+// exercise screen), so the app never shows two different numbers for a lift.
+//   • Each set aims to beat that same set from last time by one rep, capped
+//     at the top of the rep range.
+//   • Once every set at your top weight hit the top of the range, the top
+//     weight goes up (5 lb upper body / 10 lb lower) at the bottom of the range.
+//   • Coming back from 3+ weeks off: every set about 10% lighter, same reps,
+//     for your first two sessions back.
+// The "top" target is the one for last time's best set.
+// ═══════════════════════════════════════════════════════════════════════════
+const COMEBACK_DAYS = 21;
+
+// Returns { weeks, sessionsBack } while you're easing back in, else null
+function comebackInfo(history) {
+  if (!history.length) return null;
+  const now = Date.now();
+  const gapNow = (now - history[0].startedAt) / 86400000;
+  if (gapNow >= COMEBACK_DAYS) return { weeks: Math.floor(gapNow / 7), sessionsBack: 0, last: history[0].startedAt };
+  // Sessions since the most recent 3+ week gap (history is newest first)
+  for (let i = 0; i < Math.min(history.length - 1, 2); i++) {
+    const gap = (history[i].startedAt - history[i + 1].startedAt) / 86400000;
+    if (gap >= COMEBACK_DAYS) return { weeks: Math.floor(gap / 7), sessionsBack: i + 1, last: history[i + 1].startedAt };
   }
-  return {
-    increase: false,
-    weight: String(topW),
-    reps: String(target ? Math.min(minReps + 1, target.max) : minReps + 1),
-    rationale: target ? `build every set to ${target.max}` : "try +1 rep",
-  };
+  return null;
 }
 
-// Suggestion for one specific set: after a load increase, the new target;
-// otherwise beat that same set from last time by a rep (capped at the top).
-function setSuggestion(rec, lastSets, si, targetReps) {
-  if (!rec) return null;
-  if (!lastSets || !lastSets.length) return rec;
-  const src = lastSets[si] || lastSets[lastSets.length - 1];
-  if (src.warmup) return { increase: false, weight: src.weight, reps: src.reps };
-  if (rec.increase) return rec;
-  const t = parseRepTarget(targetReps);
-  const r = Number(src.reps) || 0;
-  return { increase: false, weight: src.weight, reps: String(t ? Math.min(r + 1, t.max) : r + 1) };
+function roundLoad(w, name, bw) {
+  const step = bw || isLowerBody(name) || /barbell|bench|squat|deadlift/i.test(name) ? 5 : 2.5;
+  return Math.max(0, Math.round(w / step) * step);
+}
+
+function nextTargets(history, name, repsText, bw) {
+  const last = findLastSessionSets(history, name);
+  if (!last || !last.length) return null;
+  const work = last.filter(s => !s.warmup);
+  if (!work.length) return null;
+  const num = x => Number(x) || 0;
+  const t = parseRepTarget(repsText || "8–12");
+  const inc = bw ? 5 : (isLowerBody(name) ? 10 : 5);
+  const cb = comebackInfo(history);
+  const topW = Math.max(...work.map(s => num(s.weight)));
+  const minTopReps = Math.min(...work.filter(s => num(s.weight) === topW).map(s => num(s.reps)));
+  const increase = !cb && !!t && minTopReps >= t.max;
+
+  const sets = last.map(s => {
+    if (s.warmup) return { weight: cb ? String(roundLoad(num(s.weight) * 0.9, name, bw)) : s.weight, reps: s.reps, warmup: true };
+    if (cb) return { weight: String(roundLoad(num(s.weight) * 0.9, name, bw)), reps: s.reps };
+    if (increase && num(s.weight) === topW) return { weight: String(topW + inc), reps: String(t.min) };
+    const r = num(s.reps) + 1;
+    return { weight: s.weight, reps: String(t ? Math.min(r, t.max) : r) };
+  });
+
+  // Last time's best working set → its target is the headline number
+  let bestIdx = -1;
+  last.forEach((s, i) => {
+    if (s.warmup) return;
+    if (bestIdx < 0) { bestIdx = i; return; }
+    const b = last[bestIdx];
+    if (num(s.weight) > num(b.weight) || (num(s.weight) === num(b.weight) && num(s.reps) > num(b.reps))) bestIdx = i;
+  });
+  const top = sets[bestIdx];
+  const rationale = cb
+    ? `back after ${cb.weeks} weeks, about 10% lighter`
+    : increase
+      ? `+${inc} lb, every top set hit ${t.max} last time`
+      : "beat each set by a rep";
+  return { increase, comeback: !!cb, sets, top, rationale };
+}
+
+// Headline target for a lift: { increase, comeback, weight, reps, rationale }
+function recommendNextSet(history, exerciseName, targetRepsStr, bw) {
+  const n = nextTargets(history, exerciseName, targetRepsStr, bw);
+  if (!n || !n.top) return null;
+  return { increase: n.increase, comeback: n.comeback, weight: n.top.weight, reps: n.top.reps, rationale: n.rationale };
 }
 
 function exerciseTimeSeries(workouts, name) {
@@ -773,8 +808,11 @@ function parseRestSeconds(rest) {
 }
 
 // Sets for a newly added or swapped exercise, prefilled from its last session
-function buildSets(history, name, n) {
-  const last = findLastSessionSets(history, name);
+function buildSets(history, name, n, bw) {
+  let last = findLastSessionSets(history, name);
+  // Easing back in after a break: prefill the lighter targets, not old numbers
+  const cb = last && comebackInfo(history);
+  if (cb) last = last.map(x => ({ ...x, weight: String(roundLoad((Number(x.weight) || 0) * 0.9, name, bw)) }));
   return Array.from({ length: n }, (_, i) => {
     const src = last ? (last[i] || last[last.length - 1]) : null;
     return src
@@ -1301,7 +1339,9 @@ function compareToLast(w, prior) {
       if (sw > pw || (sw === pw && sr > pr)) beat++;
     });
   }
-  return { volPct: pv ? ((v - pv) / pv) * 100 : null, beat, compared, date: prev.startedAt };
+  const sets = workoutSets(w), prevSets = workoutSets(prev);
+  const comparable = prevSets > 0 && sets >= prevSets * 0.8;
+  return { volPct: pv && comparable ? ((v - pv) / pv) * 100 : null, beat, compared, date: prev.startedAt };
 }
 
 // The number to beat on a day's first lift, for the Home card
@@ -1369,7 +1409,7 @@ function trackedLifts(history, minSessions = 2) {
 // Progressing / holding / stalled, from the smoothed e1RM series
 function liftStatus(series) {
   const v = series.map(s => s.e1rm);
-  if (v.length < 3) return { key: "new", label: "Building data" };
+  if (v.length < 3) return { key: "new", label: `${v.length} session${v.length === 1 ? "" : "s"} so far` };
   const sm = smoothSeries(v);
   const bestBefore = v.length >= 5 ? Math.max(...v.slice(0, -3)) : Infinity;
   const recentBest = Math.max(...v.slice(-3));
@@ -1412,7 +1452,9 @@ function strengthIndex(history, weeks = 12) {
   const k = l => Math.min(3, Math.floor(l.series.length / 2) || 1);
   const base = l => avg(l.series.slice(0, k(l)).map(s => s.e1rm));
   const change = 100 * avg(lifts.map(l => avg(l.series.slice(-k(l)).map(s => s.e1rm)) / base(l))) - 100;
-  const nWeeks = Math.min(52, Math.max(1, Math.ceil((Date.now() - win.start.getTime()) / (7 * 86400000))));
+  // The line stops at your last session; a gap isn't drawn as a plateau
+  const lastAt = Math.max(...lifts.map(l => l.series[l.series.length - 1].date));
+  const nWeeks = Math.min(52, Math.max(1, Math.ceil((lastAt + 1 - win.start.getTime()) / (7 * 86400000))));
   const points = [];
   for (let i = 0; i < nWeeks; i++) {
     const end = addDays(win.start, 7 * (i + 1)).getTime();
@@ -1426,7 +1468,7 @@ function strengthIndex(history, weeks = 12) {
   }
   // Collapse runs of identical weeks so long gaps don't draw as flat plateaus
   const compact = points.filter((p, i) => i === 0 || i === points.length - 1 || Math.abs(p.v - points[i - 1].v) > 1e-9);
-  return { points: compact, change, lifts, label: win.label, short: compact.length < 2 };
+  return { points: compact, change, lifts, label: win.label, short: compact.length < 2, lastAt };
 }
 
 // Share of working sets that beat the same set from the previous session of that lift
@@ -1580,28 +1622,21 @@ function fmtPct(x) {
 // ═══════════════════════════════════════════════════════════════════════════
 // TODAY — what's at stake in the next session
 // ═══════════════════════════════════════════════════════════════════════════
-// Each lift's top-set target for next time, flagged if hitting it would be a record
+// Each lift's headline target for next time, flagged if hitting it would be a record
 function todayTargets(history, day) {
+  const cb = comebackInfo(history);
   const rows = [];
   for (const e of day.exercises) {
     const bw = !!e.bw;
     const rec = recommendNextSet(history, e.name, e.reps, bw);
     if (!rec) continue;
-    // Top-set target: after a load increase, the new weight; otherwise beat
-    // your best set from last time by a rep (your first working set is freshest)
-    let t = { weight: rec.weight, reps: rec.reps };
-    if (!rec.increase) {
-      const last = (findLastSessionSets(history, e.name) || []).filter(x => !x.warmup);
-      const top = last.reduce((b, x) => (!b || (Number(x.weight) || 0) > (Number(b.weight) || 0) || ((Number(x.weight) || 0) === (Number(b.weight) || 0) && Number(x.reps) > Number(b.reps))) ? x : b, null);
-      const rt = parseRepTarget(e.reps);
-      if (top) t = { weight: top.weight, reps: String(Math.min(Number(top.reps) + 1, rt ? rt.max : Number(top.reps) + 1)) };
-    }
-    rows.push({ name: e.name, bw, ...t, kind: prKind(priorStats(history, e.name), t, bw, CURRENT_BW) });
+    const t = { weight: rec.weight, reps: rec.reps };
+    rows.push({ name: e.name, bw, ...t, kind: cb ? null : prKind(priorStats(history, e.name), t, bw, CURRENT_BW) });
   }
   const prs = rows.filter(r => r.kind);
   const order = new Map(day.exercises.map((e, i) => [e.name, i]));
   const shown = [...prs, ...rows.filter(r => !r.kind)].slice(0, 3).sort((x, y) => order.get(x.name) - order.get(y.name));
-  return { rows: shown, prCount: prs.length };
+  return { rows: shown, prCount: prs.length, comeback: cb };
 }
 
 // Only when this week could break a streak of 2+ weeks
@@ -2056,7 +2091,7 @@ export default function App() {
           targetReps: ex.reps,
           rest: ex.rest,
           // Prefilled from last session, never pre-marked done
-          sets: buildSets(history, ex.name, ex.sets),
+          sets: buildSets(history, ex.name, ex.sets, !!ex.bw),
         })),
       };
       setRest(null);
@@ -2346,6 +2381,8 @@ export default function App() {
       history={history}
       bodyweight={bodyweight}
       onBodyweightChange={updateBodyweight}
+      target={target}
+      onTargetChange={updateTarget}
       themePref={themePref}
       onThemeChange={updateThemePref}
       onExportClaude={exportForClaude}
@@ -2729,8 +2766,15 @@ function ContextCard({ history, active, hero, target, onStart }) {
       <>
         <div style={{ fontSize: 13, fontWeight: 700, color: hero.ink }}>{hero.label} day</div>
         <div style={{ fontSize: 21, fontWeight: 800, letterSpacing: "-0.02em", marginTop: 2 }}>
-          {n ? `${n} PR${n === 1 ? "" : "s"} on the table` : "Numbers to beat"}
+          {targets.comeback ? "Easing back in" : n ? `${n} PR${n === 1 ? "" : "s"} on the table` : "Numbers to beat"}
         </div>
+        {targets.comeback ? (
+          <div style={{ fontSize: 14, color: c.ink2, marginTop: 4, lineHeight: 1.45 }}>
+            {targets.comeback.sessionsBack === 0
+              ? `It's been ${targets.comeback.weeks} weeks. Targets are about 10% lighter for your first two sessions back.`
+              : "One more lighter session, then back to chasing PRs."}
+          </div>
+        ) : null}
         <div style={{ marginTop: 12 }}>
           {targets.rows.map((r, i) => (
             <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}>
@@ -2738,7 +2782,7 @@ function ContextCard({ history, active, hero, target, onStart }) {
               <span className="num" style={{ fontSize: 16, fontWeight: 800, flexShrink: 0 }}>{fmtSetShort(r.weight, r.bw)} × {r.reps}</span>
               <span style={{ width: 78, flexShrink: 0, display: "flex", justifyContent: "flex-end" }}>
                 {r.kind ? (
-                  <span style={{ fontSize: 11, fontWeight: 800, color: c.good, background: a(c.good, 12), padding: "4px 7px", borderRadius: 7, whiteSpace: "nowrap" }}>{r.kind === "e1rm" ? "PR" : PR_SHORT[r.kind]}</span>
+                  <span style={{ fontSize: 11, fontWeight: 800, color: c.good, background: a(c.good, 12), padding: "4px 7px", borderRadius: 7, whiteSpace: "nowrap" }}>PR</span>
                 ) : null}
               </span>
             </div>
@@ -2797,6 +2841,9 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
   const lastHero = history.find(w => w.dayId === hero.id);
   const toBeat = null; // targets now live in the Today card below
   const sore = active ? null : readinessFor(history, hero);
+  const cbHero = active ? null : comebackInfo(history);
+  const [editTarget, setEditTarget] = useState(false);
+  const [preview, setPreview] = useState(null); // day id for the Other days preview
   const typical = typicalDuration(history, hero.id);
   const activeDone = active ? active.exercises.reduce((s, e) => s + e.sets.filter(x => x.done).length, 0) : 0;
   const activeTotal = active ? active.exercises.reduce((s, e) => s + e.sets.length, 0) : 0;
@@ -2849,7 +2896,9 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
                 </>
               ) : (
                 <>
-                  <div>{sore
+                  <div>{cbHero && cbHero.sessionsBack === 0
+                    ? `Welcome back, last trained ${fmtDate(cbHero.last)}`
+                    : sore
                     ? `${sore.m} trained ${sore.d === 0 ? "today" : "yesterday"}`
                     : lastHero ? `Rested, last done ${ago(lastHero.startedAt)}` : "First one on the log"}</div>
                   <div>{hero.exercises.length} exercises{typical ? `, about ${fmtDur(typical)}` : ""}</div>
@@ -2872,16 +2921,16 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
       <ContextCard history={history} active={active} hero={hero} target={target} onStart={onStart} />
 
       {/* This week */}
-      <div className="card" style={{ padding: "20px 18px 8px", marginTop: 14, borderRadius: 26 }}>
+      <div className="card" style={{ padding: "20px 18px 20px", marginTop: 14, borderRadius: 26 }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "0 4px" }}>
-          <div>
+          <button onClick={() => setEditTarget(true)} className="tap" aria-label={`${thisWeek} of ${target} sessions this week. Change weekly target`} style={{ textAlign: "left" }}>
             <div className="display num" style={{ fontSize: 60 }}>
               {thisWeek}<span style={{ color: c.ink3, fontSize: 36 }}>/{target}</span>
             </div>
             <div style={{ fontSize: 17, color: c.ink2, marginTop: 8 }}>
               {thisWeek >= target ? "Target hit this week" : "sessions this week"}
             </div>
-          </div>
+          </button>
           {streak > 0 ? (
             <div style={{ textAlign: "right", paddingTop: 6 }}>
               <div style={{ display: "inline-flex", alignItems: "center", gap: 5, color: c.caution }}>
@@ -2906,21 +2955,6 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
           ))}
         </div>
 
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          marginTop: 18, padding: "8px 4px 4px", borderTop: `1px solid ${c.lineSoft}`,
-        }}>
-          <span style={{ fontSize: 16, color: c.ink2 }}>Weekly target</span>
-          <div style={{ display: "flex", alignItems: "center" }}>
-            <IconButton label="Lower weekly target" onClick={() => onTargetChange(target - 1)} style={{ color: target <= 1 ? c.ink4 : c.ink }}>
-              <Minus size={20} strokeWidth={2.2} />
-            </IconButton>
-            <span className="num" style={{ minWidth: 24, textAlign: "center", fontSize: 19, fontWeight: 800 }}>{target}</span>
-            <IconButton label="Raise weekly target" onClick={() => onTargetChange(target + 1)} style={{ color: target >= 7 ? c.ink4 : c.ink }}>
-              <Plus size={20} strokeWidth={2.2} />
-            </IconButton>
-          </div>
-        </div>
       </div>
 
       <h2 className="h-sec" style={{ fontSize: 22, margin: "30px 6px 14px" }}>Other days</h2>
@@ -2930,7 +2964,7 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
           return (
             <button
               key={day.id}
-              onClick={() => onStart(day.id)}
+              onClick={() => setPreview(day.id)}
               className="card tap"
               style={{ position: "relative", overflow: "hidden", textAlign: "left", padding: "18px 16px 18px", borderRadius: 26 }}
             >
@@ -2947,6 +2981,50 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
           );
         })}
       </div>
+
+      {editTarget ? (
+        <BottomSheet title="Weekly target" onClose={() => setEditTarget(false)}>
+          <p style={{ margin: "0 0 18px", fontSize: 14, color: c.ink3, lineHeight: 1.45 }}>
+            Sessions per week you're aiming for. Hitting it builds your streak.
+          </p>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, marginBottom: 20 }}>
+            <button onClick={() => onTargetChange(target - 1)} disabled={target <= 1} className="tap" aria-label="Lower weekly target" style={{ width: 56, height: 56, borderRadius: 18, background: c.inset, color: target <= 1 ? c.ink4 : c.ink, display: "flex", alignItems: "center", justifyContent: "center" }}><Minus size={22} strokeWidth={2.6} /></button>
+            <span className="display num" style={{ fontSize: 64, minWidth: 60, textAlign: "center" }}>{target}</span>
+            <button onClick={() => onTargetChange(target + 1)} disabled={target >= 7} className="tap" aria-label="Raise weekly target" style={{ width: 56, height: 56, borderRadius: 18, background: c.inset, color: target >= 7 ? c.ink4 : c.ink, display: "flex", alignItems: "center", justifyContent: "center" }}><Plus size={22} strokeWidth={2.6} /></button>
+          </div>
+          <button onClick={() => setEditTarget(false)} className="tap" style={{ width: "100%", height: 52, borderRadius: 16, background: c.ink, color: c.bg, fontSize: 16, fontWeight: 750 }}>Done</button>
+        </BottomSheet>
+      ) : null}
+
+      {preview ? (() => {
+        const d = findDay(preview);
+        const last = history.find(w => w.dayId === d.id);
+        return (
+          <BottomSheet title={`${d.label} day`} onClose={() => setPreview(null)}>
+            <div style={{ fontSize: 14, color: c.ink3, margin: "-4px 0 14px" }}>
+              {d.exercises.length} exercises{last ? `, last done ${ago(last.startedAt)}` : ""}
+            </div>
+            <div className="card" style={{ overflow: "hidden", marginBottom: 16 }}>
+              {d.exercises.map((e, i) => {
+                const rec = recommendNextSet(history, e.name, e.reps, !!e.bw);
+                return (
+                  <div key={e.name} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}>
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 650, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shortLiftName(e.name)}</span>
+                    <span className="num" style={{ fontSize: 14, fontWeight: 700, color: rec ? c.ink : c.ink4, flexShrink: 0 }}>
+                      {rec ? `${fmtSetShort(rec.weight, !!e.bw)} × ${rec.reps}` : `${e.sets} × ${e.reps}`}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              onClick={() => { setPreview(null); onStart(d.id); }}
+              className="tap"
+              style={{ width: "100%", height: 56, borderRadius: 18, background: d.color, color: d.on, fontSize: 17, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+            >Start {d.label} <ArrowRight size={19} strokeWidth={2.6} /></button>
+          </BottomSheet>
+        );
+      })() : null}
     </div>
   );
 }
@@ -3072,14 +3150,15 @@ function SessionSummary({ workout, newPRs, history, onDismiss }) {
               {newPRs.slice(0, 4).map((pr, i) => (
                 <div key={i} className="rise" style={{
                   animationDelay: `${120 + i * 70}ms`,
-                  display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12,
+                  display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12,
                   padding: "10px 0", borderTop: `1px solid ${c.lineSoft}`,
                 }}>
-                  <span style={{ fontSize: 15, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pr.name}</span>
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 15, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pr.name}</span>
+                    <span style={{ display: "block", fontSize: 12, color: c.ink3, marginTop: 1 }}>{PR_LABEL[pr.kind].replace(/^./, ch => ch.toUpperCase())}</span>
+                  </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                    <span style={{ fontSize: 11, fontWeight: 750, color: c.good, background: a(c.good, 12), padding: "3px 7px", borderRadius: 6 }}>
-                      {PR_SHORT[pr.kind]}
-                    </span>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: c.good, background: a(c.good, 12), padding: "3px 7px", borderRadius: 6 }}>PR</span>
                     <span className="num" style={{ fontSize: 16, fontWeight: 750 }}>
                       <LoadText weight={pr.weight} bw={pr.bw} /> × {pr.reps}
                     </span>
@@ -3304,7 +3383,7 @@ function WorkoutScreen({
         targetSets: orig.targetSets,
         targetReps: item.reps || orig.targetReps,
         rest: item.rest || orig.rest,
-        sets: buildSets(history, clean, orig.sets.length),
+        sets: buildSets(history, clean, orig.sets.length, isBodyweight(clean)),
       };
       onUpdate({ ...workout, exercises: workout.exercises.map((e, i) => i === ei ? newEx : e) }, true);
       setActiveSet(prev => { const p = { ...prev }; delete p[ei]; return p; });
@@ -3317,7 +3396,7 @@ function WorkoutScreen({
         targetSets: n,
         targetReps: item.reps || "8–12",
         rest: item.rest || "90 s",
-        sets: buildSets(history, clean, n),
+        sets: buildSets(history, clean, n, isBodyweight(clean)),
       };
       onUpdate({ ...workout, exercises: [...workout.exercises, newEx] }, true);
       setOpenIdx(workout.exercises.length);
@@ -3393,6 +3472,7 @@ function WorkoutScreen({
                 current={currentSetOf(ei)}
                 lastSets={findLastSessionSets(history, ex.name)}
                 rec={recommendNextSet(history, ex.name, ex.targetReps, bw)}
+                targets={nextTargets(history, ex.name, ex.targetReps, bw)}
                 step={bw ? 5 : (isLowerBody(ex.name) ? 10 : 5)}
                 bodyweight={bodyweight}
                 onBodyweightChange={onBodyweightChange}
@@ -3504,9 +3584,9 @@ function WorkoutScreen({
               <Trophy size={16} strokeWidth={2.4} />
             </span>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 800 }}>New PR, {PR_LABEL[toast.kind]}</div>
+              <div style={{ fontSize: 14, fontWeight: 800 }}>New PR</div>
               <div className="num" style={{ fontSize: 13, opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {toast.name} {toast.text}
+                {shortLiftName(toast.name)} {toast.text}, {PR_LABEL[toast.kind]}
               </div>
             </div>
           </div>
@@ -3554,14 +3634,20 @@ function WorkoutScreen({
 }
 
 function ExerciseCard({
-  ex, bw, day, open, onToggle, current, lastSets, rec, step,
+  ex, bw, day, open, onToggle, current, lastSets, rec, targets, step,
   bodyweight, onBodyweightChange, note, onNoteChange, stats, onToggleWarmup, rirAsk, onRir, onHistory,
   onSelectSet, onEditSet, onLog, onUndo, onRemoveSet, onAddSet, onFill, onSwap, onRemove,
 }) {
   const done = ex.sets.filter(s => s.done).length;
   const complete = isExerciseDone(ex);
   const curSet = current >= 0 ? ex.sets[current] : null;
-  const sug = curSet && !curSet.done && !curSet.warmup ? setSuggestion(rec, lastSets, current, ex.targetReps) : null;
+  // Same target model as Today and the exercise screen: this set's own target
+  const sugFor = i => {
+    if (!targets) return null;
+    const t = targets.sets[i] || targets.sets[targets.sets.length - 1];
+    return t && !t.warmup ? t : targets.top;
+  };
+  const sug = curSet && !curSet.done && !curSet.warmup ? sugFor(current) : null;
   const recApplied = sug && curSet.weight === sug.weight && curSet.reps === sug.reps;
   const showRec = !!sug && !complete;
 
@@ -3649,7 +3735,11 @@ function ExerciseCard({
               ) : null}
             </div>
           ) : null}
-          {rec && rec.increase && !complete ? (
+          {rec && rec.comeback && !complete ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: c.caution, fontWeight: 650, padding: "0 4px 12px", marginTop: -4 }}>
+              <Undo2 size={14} strokeWidth={2.6} /> Easing back in: {rec.rationale}
+            </div>
+          ) : rec && rec.increase && !complete ? (
             <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: c.good, fontWeight: 650, padding: "0 4px 12px", marginTop: -4 }}>
               <TrendingUp size={14} strokeWidth={2.6} /> Time to go up: {rec.rationale}
             </div>
@@ -3788,7 +3878,7 @@ function SetLine({ set, idx, bw, day, pr, onSelect }) {
           display: "inline-flex", alignItems: "center", gap: 4,
           fontSize: 11, fontWeight: 800, color: c.good,
           background: a(c.good, 12), padding: "4px 8px", borderRadius: 7,
-        }}><Trophy size={12} strokeWidth={2.6} /> {PR_SHORT[pr]}</span>
+        }} title={PR_LABEL[pr]}><Trophy size={12} strokeWidth={2.6} /> PR</span>
       ) : wu ? (
         <span style={{ fontSize: 12, color: c.ink3, fontWeight: 600 }}>Warm-up</span>
       ) : set.done && set.rir !== undefined && set.rir !== null ? (
@@ -4753,6 +4843,7 @@ function ExerciseListSheet({ current, otherNames, history, onPick, onClose }) {
 function DataView({
   history, bodyweight, onBodyweightChange, themePref, onThemeChange,
   onExportClaude, onCopyClaude, onExportExcel, onBackup, onRestore, daysSince, onEditRoutine,
+  target, onTargetChange,
 }) {
   const restoreRef = useRef(null);
   const [exportState, setExportState] = useState("idle");
@@ -4878,6 +4969,17 @@ function DataView({
             />
             <span style={{ fontSize: 14, color: c.ink3 }}>lb</span>
           </div>
+          {onTargetChange ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", borderTop: `1px solid ${c.lineSoft}` }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 15, fontWeight: 650 }}>Weekly target</div>
+                <div style={{ fontSize: 13, color: c.ink3, marginTop: 1 }}>Sessions per week for your streak</div>
+              </div>
+              <IconButton label="Lower weekly target" onClick={() => onTargetChange(target - 1)} style={{ color: target <= 1 ? c.ink4 : c.ink }}><Minus size={18} strokeWidth={2.4} /></IconButton>
+              <span className="num" style={{ minWidth: 20, textAlign: "center", fontSize: 17, fontWeight: 800 }}>{target}</span>
+              <IconButton label="Raise weekly target" onClick={() => onTargetChange(target + 1)} style={{ color: target >= 7 ? c.ink4 : c.ink }}><Plus size={18} strokeWidth={2.4} /></IconButton>
+            </div>
+          ) : null}
           <div style={{ padding: "14px 16px", borderTop: `1px solid ${c.lineSoft}` }}>
             <div style={{ fontSize: 15, fontWeight: 650, marginBottom: 10 }}>Appearance</div>
             <Segmented
@@ -5320,6 +5422,9 @@ function StrengthView({ history, onOpenExercise }) {
                 <div style={{ fontSize: 14, color: c.ink2, marginTop: 8, lineHeight: 1.4 }}>
                   Estimated 1RM across your {idx.lifts.length} main lift{idx.lifts.length === 1 ? "" : "s"}, {idx.label}
                 </div>
+                {Date.now() - idx.lastAt > 14 * 86400000 ? (
+                  <div style={{ fontSize: 13, color: c.caution, fontWeight: 650, marginTop: 6 }}>No training since {fmtDate(idx.lastAt)}</div>
+                ) : null}
               </>
             ) : (
               <div style={{ fontSize: 15, color: c.ink2, marginTop: 8, lineHeight: 1.45 }}>
@@ -5353,13 +5458,13 @@ function StrengthView({ history, onOpenExercise }) {
                   <div style={{ fontSize: 15, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shortLiftName(l.name)}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3, fontSize: 13, color: c.ink3, minWidth: 0 }}>
                     <span style={{ width: 7, height: 7, borderRadius: 99, background: s.color, flexShrink: 0 }} />
-                    <span style={{ color: l.st.key === "stalled" ? c.caution : c.ink3, fontWeight: l.st.key === "stalled" ? 700 : 500, flexShrink: 0 }}>{s.label}</span>
+                    <span style={{ color: l.st.key === "stalled" ? c.caution : c.ink3, fontWeight: l.st.key === "stalled" ? 700 : 500, flexShrink: 0 }}>{l.st.key === "new" ? l.st.label : s.label}</span>
                     {gl ? <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>, {gl.replace(/^Goal /, "goal ")}</span> : null}
                   </div>
                 </div>
                 <Sparkline values={smoothSeries(l.series.map(x => x.e1rm))} color={lineColor} />
                 <span className="num" style={{ minWidth: 54, textAlign: "right", fontSize: 15, fontWeight: 800, color: l.change > 0.5 ? c.good : l.change < -0.5 ? c.danger : c.ink3 }}>
-                  {l.series.length < 2 ? "—" : fmtPct(l.change)}
+                  {l.series.length < 3 ? "" : fmtPct(l.change)}
                 </span>
               </button>
             );
@@ -5494,7 +5599,7 @@ function ExerciseInsight({ name, history, compact, onGoalChange }) {
 
       {st ? (
         <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700, color: STATUS_STYLE[st.key].color, marginBottom: stallTip ? 6 : 12 }}>
-          <span style={{ width: 8, height: 8, borderRadius: 99, background: STATUS_STYLE[st.key].color }} /> {STATUS_STYLE[st.key].label}
+          <span style={{ width: 8, height: 8, borderRadius: 99, background: STATUS_STYLE[st.key].color }} /> {st.key === "new" ? st.label : STATUS_STYLE[st.key].label}
         </div>
       ) : null}
       {stallTip ? <p style={{ margin: "0 0 14px", fontSize: 14, color: c.ink2, lineHeight: 1.45 }}>{stallTip}</p> : null}
@@ -5509,7 +5614,10 @@ function ExerciseInsight({ name, history, compact, onGoalChange }) {
       {rec ? (
         <div style={{ padding: "12px 14px", borderRadius: 14, background: a(c.good, 10), display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
           <TrendingUp size={17} color={c.good} strokeWidth={2.4} />
-          <span style={{ fontSize: 14, color: c.ink2 }}>Next time, try <strong className="num" style={{ color: c.ink }}>{fmtSetShort(rec.weight, bw)} × {rec.reps}</strong></span>
+          <span style={{ fontSize: 14, color: c.ink2, lineHeight: 1.4 }}>
+            Next top set <strong className="num" style={{ color: c.ink }}>{fmtSetShort(rec.weight, bw)} × {rec.reps}</strong>
+            <span style={{ display: "block", fontSize: 12, color: c.ink3 }}>{rec.rationale.replace(/^./, ch => ch.toUpperCase())}</span>
+          </span>
         </div>
       ) : null}
 
