@@ -1532,7 +1532,7 @@ function goalProgress(name, series, repsText, bw) {
   if (slope <= 0.02) return { goal, reps, status: "flat", toGo };
   const days = (targetE - cur) / slope;
   if (days > 540) return { goal, reps, status: "far", toGo };
-  return { goal, reps, status: "pace", toGo, date: Date.now() + days * 86400000 };
+  return { goal, reps, status: "pace", toGo, date: Date.now() + days * 86400000, targetE: Math.round(targetE) };
 }
 function goalLine(g) {
   if (!g) return null;
@@ -1663,6 +1663,48 @@ function readinessFor(history, day) {
     if (d !== null && d < 2 && (!worst || d < worst.d)) worst = { m, d };
   }
   return worst;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NEXT JUMP — how close a lift is to earning its next weight
+// Double progression: every set at your top weight has to reach the top of
+// the rep range. Reps still missing across those sets = reps to go.
+// ═══════════════════════════════════════════════════════════════════════════
+function nextJump(history, name, repsText, bw) {
+  const last = findLastSessionSets(history, name);
+  const t = parseRepTarget(repsText || "8–12");
+  if (!last || !t) return null;
+  const work = last.filter(s => !s.warmup);
+  if (!work.length) return null;
+  const num = x => Number(x) || 0;
+  const W = Math.max(...work.map(s => num(s.weight)));
+  const sets = work.filter(s => num(s.weight) === W).map(s => ({ reps: num(s.reps), max: t.max }));
+  const toGo = sets.reduce((n, s) => n + Math.max(0, s.max - s.reps), 0);
+  const worst = Math.max(...sets.map(s => Math.max(0, s.max - s.reps)));
+  const inc = bw ? 5 : (isLowerBody(name) ? 10 : 5);
+  // At about a rep per set per session, the slowest set sets the pace
+  return { weight: W, next: W + inc, sets, toGo, ready: toGo === 0, sessionsAway: worst, bw, max: t.max };
+}
+
+// Push vs pull working sets over the last few weeks, by the day they were logged on
+function pushPullBalance(history, weeks = 4) {
+  const since = addDays(mondayOf(Date.now()), -7 * (weeks - 1)).getTime();
+  let push = 0, pull = 0;
+  for (const w of history) {
+    if (w.startedAt < since) continue;
+    const n = workoutSets(w);
+    if (w.dayId === "push") push += n;
+    else if (w.dayId === "pull") pull += n;
+  }
+  if (!push && !pull) return null;
+  return { push, pull, ratio: pull ? push / pull : Infinity, weeks };
+}
+
+// First vs latest top set inside the Progress window, for "then vs now"
+function thenVsNow(series) {
+  if (!series || series.length < 2) return null;
+  const f = series[0], l = series[series.length - 1];
+  return { from: { w: f.top, r: f.topReps }, to: { w: l.top, r: l.topReps }, bw: l.bw };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5331,8 +5373,9 @@ function Sparkline({ values, color, width = 72, height = 26 }) {
   );
 }
 
-// Line chart with optional reference line (e.g. 100 for the Strength Index)
-function LineChart({ points, color, height = 150, refY, format = v => Math.round(v), labelLast = true }) {
+// Line chart with an optional reference line (e.g. 100 for the Strength Index)
+// and an optional dashed projection to a goal.
+function LineChart({ points, color, height = 150, refY, format = v => Math.round(v), labelLast = true, projection }) {
   const ref = useRef(null);
   const [w, setW] = useState(320);
   useEffect(() => {
@@ -5344,21 +5387,25 @@ function LineChart({ points, color, height = 150, refY, format = v => Math.round
     return () => window.removeEventListener("resize", measure);
   }, []);
   if (!points || points.length < 2) return <div ref={ref} style={{ height }} />;
-  const pad = { l: 4, r: labelLast ? 44 : 6, t: 12, b: 20 };
-  const ys = points.map(p => p.v).concat(refY !== undefined ? [refY] : []);
+  const pad = { l: 4, r: projection ? 12 : labelLast ? 44 : 6, t: projection ? 26 : 12, b: 20 };
+  const ys = points.map(p => p.v).concat(refY !== undefined ? [refY] : []).concat(projection ? [projection.v] : []);
   let min = Math.min(...ys), max = Math.max(...ys);
   const span0 = max - min || Math.max(1, Math.abs(max) * 0.05);
   min -= span0 * 0.12; max += span0 * 0.12;
-  const X = i => pad.l + (i / (points.length - 1)) * (w - pad.l - pad.r);
+  // Projection gets its own stretch of x-axis (about a third), scaled by time
+  const nX = points.length - 1;
+  const lastP = points[points.length - 1];
+  const histW = (w - pad.l - pad.r) * (projection ? 0.68 : 1);
+  const X = i => pad.l + (nX ? (i / nX) : 0) * histW;
+  const XP = pad.l + (w - pad.l - pad.r);
   const Y = v => pad.t + (1 - (v - min) / (max - min)) * (height - pad.t - pad.b);
   const d = points.map((p, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(p.v).toFixed(1)}`).join(" ");
-  const area = `${d} L${X(points.length - 1).toFixed(1)} ${height - pad.b} L${X(0).toFixed(1)} ${height - pad.b} Z`;
+  const area = `${d} L${X(nX).toFixed(1)} ${height - pad.b} L${X(0).toFixed(1)} ${height - pad.b} Z`;
   const gid = `lc${String(color).replace(/[^a-z0-9]/gi, "")}`;
-  const lastP = points[points.length - 1];
   const fmtT = t => new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
   return (
     <div ref={ref} style={{ width: "100%" }}>
-      <svg width={w} height={height} role="img" aria-label={`Trend from ${format(points[0].v)} to ${format(lastP.v)}`}>
+      <svg width={w} height={height} role="img" aria-label={`Trend from ${format(points[0].v)} to ${format(lastP.v)}${projection ? `, projected ${projection.label}` : ""}`}>
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={color} stopOpacity="0.22" />
@@ -5370,15 +5417,123 @@ function LineChart({ points, color, height = 150, refY, format = v => Math.round
         ) : null}
         <path d={area} fill={`url(#${gid})`} />
         <path d={d} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        <circle cx={X(points.length - 1)} cy={Y(lastP.v)} r="4.5" fill={color} stroke={CHART_HEX.tip} strokeWidth="2" />
-        {labelLast ? (
-          <text x={X(points.length - 1) + 9} y={Y(lastP.v) + 4} fontSize="13" fontWeight="800" fill={CHART_HEX.ink} style={{ fontVariantNumeric: "tabular-nums" }}>
+        {projection ? (
+          <>
+            <line x1={X(nX)} y1={Y(lastP.v)} x2={XP} y2={Y(projection.v)} stroke={color} strokeWidth="2" strokeDasharray="4 5" strokeLinecap="round" opacity="0.8" />
+            <line x1={pad.l} x2={XP} y1={Y(projection.v)} y2={Y(projection.v)} stroke={CHART_HEX.muted} strokeDasharray="2 4" strokeWidth="1" opacity="0.6" />
+            <circle cx={XP} cy={Y(projection.v)} r="5" fill={CHART_HEX.tip} stroke={color} strokeWidth="2.5" />
+            <text x={XP} y={Y(projection.v) - 11} fontSize="12" fontWeight="800" fill={CHART_HEX.ink} textAnchor="end">{projection.label}</text>
+          </>
+        ) : null}
+        <circle cx={X(nX)} cy={Y(lastP.v)} r="4.5" fill={color} stroke={CHART_HEX.tip} strokeWidth="2" />
+        {labelLast && !projection ? (
+          <text x={X(nX) + 9} y={Y(lastP.v) + 4} fontSize="13" fontWeight="800" fill={CHART_HEX.ink} style={{ fontVariantNumeric: "tabular-nums" }}>
             {format(lastP.v)}
           </text>
         ) : null}
         <text x={pad.l} y={height - 4} fontSize="11" fill={CHART_HEX.muted}>{fmtT(points[0].t)}</text>
-        <text x={w - pad.r} y={height - 4} fontSize="11" fill={CHART_HEX.muted} textAnchor="end">{fmtT(lastP.t)}</text>
+        <text x={projection ? X(nX) : w - pad.r} y={height - 4} fontSize="11" fill={CHART_HEX.muted} textAnchor="end">{fmtT(lastP.t)}</text>
+        {projection ? <text x={XP} y={height - 4} fontSize="11" fill={CHART_HEX.muted} textAnchor="end">{fmtT(projection.t)}</text> : null}
       </svg>
+    </div>
+  );
+}
+
+// Working weight as a staircase: flat steps while reps climb, then a jump.
+// Each step is labelled with the reps of that session's top set.
+function StepChart({ points, color, height = 160, bw }) {
+  const ref = useRef(null);
+  const [w, setW] = useState(320);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setW(el.clientWidth || 320);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  if (!points || points.length < 2) return <div ref={ref} style={{ height }} />;
+  const pts = points.slice(-14); // last 14 sessions keep labels readable
+  const pad = { l: 12, r: 46, t: 22, b: 20 };
+  const vs = pts.map(p => p.v);
+  let min = Math.min(...vs), max = Math.max(...vs);
+  const span0 = max - min || Math.max(5, max * 0.05);
+  min -= span0 * 0.25; max += span0 * 0.25;
+  const n = pts.length;
+  const X = i => pad.l + (i / (n - 1)) * (w - pad.l - pad.r);
+  const Y = v => pad.t + (1 - (v - min) / (max - min)) * (height - pad.t - pad.b);
+  let d = `M${X(0).toFixed(1)} ${Y(pts[0].v).toFixed(1)}`;
+  for (let i = 1; i < n; i++) d += ` H${X(i).toFixed(1)} V${Y(pts[i].v).toFixed(1)}`;
+  const fmtT = t => new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const last = pts[n - 1];
+  return (
+    <div ref={ref} style={{ width: "100%" }}>
+      <svg width={w} height={height} role="img" aria-label={`Working weight from ${pts[0].v} to ${last.v}`}>
+        <path d={d} fill="none" stroke={color} strokeWidth="2.5" strokeLinejoin="round" />
+        {pts.map((p, i) => {
+          const jump = i > 0 && p.v > pts[i - 1].v;
+          return (
+            <g key={i}>
+              <circle cx={X(i)} cy={Y(p.v)} r={jump ? 5 : 3.5} fill={jump ? color : CHART_HEX.tip} stroke={color} strokeWidth="2" />
+              {n <= 14 ? (
+                <text x={X(i)} y={Y(p.v) - 9} fontSize="10" fontWeight="700" fill={CHART_HEX.muted} textAnchor="middle">{p.reps}</text>
+              ) : null}
+            </g>
+          );
+        })}
+        <text x={X(n - 1) + 9} y={Y(last.v) + 4} fontSize="13" fontWeight="800" fill={CHART_HEX.ink}>{bw ? (last.v > 0 ? `+${last.v}` : "BW") : last.v}</text>
+        <text x={pad.l} y={height - 4} fontSize="11" fill={CHART_HEX.muted}>{fmtT(pts[0].t)}</text>
+        <text x={X(n - 1)} y={height - 4} fontSize="11" fill={CHART_HEX.muted} textAnchor="end">{fmtT(last.t)}</text>
+      </svg>
+    </div>
+  );
+}
+
+// Compact "next jump" meter: one bar per set at your top weight, filling toward the top of the range
+function JumpMeter({ jump, color, width = 72, height = 26 }) {
+  const n = jump.sets.length;
+  const gap = 3;
+  const bw = (width - gap * (n - 1)) / n;
+  return (
+    <svg width={width} height={height} aria-hidden="true" style={{ flexShrink: 0 }}>
+      {jump.sets.map((s, i) => {
+        const h = Math.max(2, (Math.min(s.reps, s.max) / s.max) * height);
+        return (
+          <g key={i}>
+            <rect x={i * (bw + gap)} y={0} width={bw} height={height} rx="3" fill={CHART_HEX.grid} />
+            <rect x={i * (bw + gap)} y={height - h} width={bw} height={h} rx="3" fill={color} opacity={s.reps >= s.max ? 1 : 0.75} />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// Full "next jump" card for the exercise screen
+function JumpCard({ jump, color }) {
+  const unit = v => (jump.bw ? (v > 0 ? `BW+${v}` : "BW") : `${v} lb`);
+  return (
+    <div className="card" style={{ padding: "14px 16px", marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 650, color: c.ink3 }}>Next jump</div>
+        <div className="num" style={{ fontSize: 15, fontWeight: 800 }}>{unit(jump.weight)} → {unit(jump.next)}</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 7, marginTop: 12 }}>
+        {jump.sets.map((s, i) => (
+          <div key={i} style={{ display: "grid", gridTemplateColumns: "44px 1fr 44px", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 12, fontWeight: 650, color: c.ink3 }}>Set {i + 1}</span>
+            <div style={{ height: 10, borderRadius: 5, background: c.inset, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${Math.min(100, (s.reps / s.max) * 100)}%`, background: color, borderRadius: 5 }} />
+            </div>
+            <span className="num" style={{ fontSize: 13, fontWeight: 750, textAlign: "right", color: s.reps >= s.max ? c.good : c.ink2 }}>{s.reps}/{s.max}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 14, fontWeight: 700, marginTop: 12, color: jump.ready ? c.good : c.ink2 }}>
+        {jump.ready
+          ? `Every set hit ${jump.max}. Go up to ${unit(jump.next)} next time.`
+          : `${jump.toGo} rep${jump.toGo === 1 ? "" : "s"} to go until ${unit(jump.next)}${jump.sessionsAway <= 3 ? `, about ${jump.sessionsAway} session${jump.sessionsAway === 1 ? "" : "s"} away` : ""}.`}
+      </div>
     </div>
   );
 }
@@ -5423,7 +5578,7 @@ function StrengthView({ history, onOpenExercise }) {
     const all = trackedLifts(windowed, 1).map(l => {
       const st = liftStatus(l.series);
       const ex = DAYS.flatMap(d => d.exercises).find(e => e.name === l.name) || {};
-      return { ...l, st, change: liftChange(l.series), goal: goalProgress(l.name, l.series, ex.reps, !!ex.bw) };
+      return { ...l, st, change: liftChange(l.series), goal: goalProgress(l.name, l.series, ex.reps, !!ex.bw), jump: nextJump(history, l.name, ex.reps, !!ex.bw) };
     });
     const rank = { stalled: 0, up: 1, flat: 2, new: 3 };
     const main = new Set(idx && idx.lifts ? idx.lifts.map(l => l.name) : []);
@@ -5434,6 +5589,7 @@ function StrengthView({ history, onOpenExercise }) {
   const [showAll, setShowAll] = useState(false);
   const [picking, setPicking] = useState(false);
   const [info, setInfo] = useState(false);
+  const [numbersMode, setNumbersMode] = useState(false); // tap a % to flip every row to "then → now"
   const mainCount = lifts.filter(l => l.main).length || Math.min(6, lifts.length);
   const shown = showAll ? lifts : lifts.slice(0, mainCount);
   const up = idx && idx.change >= 0;
@@ -5483,32 +5639,66 @@ function StrengthView({ history, onOpenExercise }) {
       </Section>
 
       {/* Overload scoreboard */}
-      <Section title="Your lifts" aside="main lifts, stalled first">
+      <Section title="Your lifts" aside={numbersMode ? "first → latest top set" : "tap a % for the numbers"}>
         <div className="card" style={{ overflow: "hidden" }}>
           {shown.map((l, i) => {
             const s = STATUS_STYLE[l.st.key];
             const lineColor = l.day ? CHART_HEX[l.day.id] : CHART_HEX.ink;
             const gl = goalLine(l.goal);
+            const jump = l.jump;
+            const nearJump = jump && (jump.ready || jump.sessionsAway <= 2);
+            const tn = thenVsNow(l.series);
+            const showTN = numbersMode && tn;
+            const unit = (v, bw) => (bw ? (v > 0 ? `BW+${v}` : "BW") : v);
             return (
-              <button
+              <div
                 key={l.name}
+                role="button"
+                tabIndex={0}
                 onClick={() => onOpenExercise(l.name)}
+                onKeyDown={e => { if (e.key === "Enter") onOpenExercise(l.name); }}
                 className="tap"
-                style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", textAlign: "left", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}
+                style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", textAlign: "left", cursor: "pointer", borderTop: i === 0 ? "none" : `1px solid ${c.lineSoft}` }}
               >
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 15, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shortLiftName(l.name)}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3, fontSize: 13, color: c.ink3, minWidth: 0 }}>
-                    <span style={{ width: 7, height: 7, borderRadius: 99, background: s.color, flexShrink: 0 }} />
-                    <span style={{ color: l.st.key === "stalled" ? c.caution : c.ink3, fontWeight: l.st.key === "stalled" ? 700 : 500, flexShrink: 0 }}>{l.st.key === "new" ? l.st.label : s.label}</span>
-                    {gl ? <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>, {gl.replace(/^Goal /, "goal ")}</span> : null}
+                    {nearJump ? (
+                      <span style={{ color: c.good, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {jump.ready ? `Go up to ${unit(jump.next, jump.bw)}` : `${jump.toGo} rep${jump.toGo === 1 ? "" : "s"} from ${unit(jump.next, jump.bw)}`}
+                      </span>
+                    ) : (
+                      <>
+                        <span style={{ width: 7, height: 7, borderRadius: 99, background: s.color, flexShrink: 0 }} />
+                        <span style={{ color: l.st.key === "stalled" ? c.caution : c.ink3, fontWeight: l.st.key === "stalled" ? 700 : 500, flexShrink: 0 }}>{l.st.key === "new" ? l.st.label : s.label}</span>
+                        {gl ? <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>, {gl.replace(/^Goal /, "goal ")}</span> : null}
+                      </>
+                    )}
                   </div>
                 </div>
-                <Sparkline values={smoothSeries(l.series.map(x => x.e1rm))} color={lineColor} />
-                <span className="num" style={{ minWidth: 54, textAlign: "right", fontSize: 15, fontWeight: 800, color: l.change > 0.5 ? c.good : l.change < -0.5 ? c.danger : c.ink3 }}>
-                  {l.series.length < 3 ? "" : fmtPct(l.change)}
-                </span>
-              </button>
+                {showTN ? null : nearJump
+                  ? <JumpMeter jump={jump} color={lineColor} />
+                  : <Sparkline values={smoothSeries(l.series.map(x => x.e1rm))} color={lineColor} />}
+                {l.series.length < 3 ? <span style={{ minWidth: 54 }} /> : (
+                  <button
+                    onClick={e => { e.stopPropagation(); setNumbersMode(!numbersMode); }}
+                    className="tap num"
+                    aria-label={showTN ? "Show percent change" : "Show first and latest top sets"}
+                    style={{
+                      minWidth: 54, textAlign: "right", fontSize: showTN ? 13 : 15, fontWeight: 800, whiteSpace: "nowrap",
+                      color: showTN ? c.ink : l.change > 0.5 ? c.good : l.change < -0.5 ? c.danger : c.ink3,
+                    }}
+                  >
+                    {showTN ? (
+                      <>
+                        <span style={{ color: c.ink3, fontWeight: 650 }}>{unit(tn.from.w, tn.bw)}×{tn.from.r}</span>
+                        <span style={{ color: c.ink4, margin: "0 4px" }}>→</span>
+                        {unit(tn.to.w, tn.bw)}×{tn.to.r}
+                      </>
+                    ) : fmtPct(l.change)}
+                  </button>
+                )}
+              </div>
             );
           })}
           {lifts.length > mainCount ? (
@@ -5576,6 +5766,44 @@ function StrengthInfoSheet({ idx, onClose }) {
   );
 }
 
+// Push vs pull sets, one split bar. Near 1:1 is balanced; much more push than pull
+// is the classic shoulder-unfriendly drift.
+function BalanceCard({ history }) {
+  const b = useMemo(() => pushPullBalance(history, 4), [history]);
+  if (!b) return null;
+  const total = b.push + b.pull;
+  const r = b.pull ? b.push / b.pull : null;
+  const tone = r === null ? c.caution : r <= 1.25 && r >= 0.8 ? c.good : r > 1.5 || r < 0.67 ? c.caution : c.ink2;
+  const verdict = r === null ? "No pull sets logged" : r <= 1.25 && r >= 0.8 ? "Balanced" : r > 1 ? "Push-heavy" : "Pull-heavy";
+  const push = findDay("push"), pull = findDay("pull");
+  return (
+    <Section>
+      <div className="card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+          <div style={{ fontSize: 14, fontWeight: 650, color: c.ink3, whiteSpace: "nowrap" }}>Push vs pull</div>
+          <div className="num" style={{ fontSize: 15, fontWeight: 800, color: tone, whiteSpace: "nowrap" }}>
+            {verdict}{r !== null ? ` ${r >= 1 ? r.toFixed(1) : "1"} : ${r >= 1 ? "1" : (1 / r).toFixed(1)}` : ""}
+          </div>
+        </div>
+        <div role="img" aria-label={`${b.push} push sets and ${b.pull} pull sets`} style={{ display: "flex", height: 14, borderRadius: 7, overflow: "hidden", gap: 3, marginTop: 14 }}>
+          <div style={{ width: `${(b.push / total) * 100}%`, background: push.color }} />
+          <div style={{ width: `${(b.pull / total) * 100}%`, background: pull.color }} />
+        </div>
+        <div className="num" style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 13, fontWeight: 700 }}>
+          <span style={{ color: push.ink }}>Push {b.push} sets</span>
+          <span style={{ color: pull.ink }}>Pull {b.pull} sets</span>
+        </div>
+        <div style={{ fontSize: 12, color: c.ink3, marginTop: 6 }}>Working sets on push and pull days, last {b.weeks} weeks</div>
+        {r !== null && r > 1.5 ? (
+          <p style={{ margin: "10px 0 0", fontSize: 13, color: c.ink2, lineHeight: 1.45 }}>
+            Roughly 1:1 is easier on the shoulders. Adding a row or rear-delt set on pull day closes the gap faster than cutting push work.
+          </p>
+        ) : null}
+      </div>
+    </Section>
+  );
+}
+
 function VolumeView({ history }) {
   const rates = useMemo(() => beatRateByWeek(history, 8), [history]);
   const cur = rates[rates.length - 1];
@@ -5584,6 +5812,7 @@ function VolumeView({ history }) {
   const maxH = 110;
   return (
     <div>
+      <BalanceCard history={history} />
       <Section>
         <div className="card" style={{ padding: 18 }}>
           <div style={{ fontSize: 14, fontWeight: 650, color: c.ink3 }}>Sets that beat last time</div>
@@ -5634,6 +5863,8 @@ function ExerciseInsight({ name, history, compact, onGoalChange }) {
   const st = hasE ? liftStatus(series.filter(s => s.e1rm)) : null;
   const gp = hasE ? goalProgress(name, series.filter(s => s.e1rm), routineEx.reps, bw) : null;
   const [editGoal, setEditGoal] = useState(false);
+  const [chartMode, setChartMode] = useState("e1rm");
+  const jump = useMemo(() => nextJump(history, name, routineEx.reps || "8–12", bw), [history, name, bw]);
   const [goalVal, setGoalVal] = useState(goalFor(name) ? String(goalFor(name)) : "");
   const prs = useMemo(() => computePRs(history).find(p => p.name === name), [history, name]);
 
@@ -5684,10 +5915,38 @@ function ExerciseInsight({ name, history, compact, onGoalChange }) {
       ) : null}
       {stallTip ? <p style={{ margin: "0 0 14px", fontSize: 14, color: c.ink2, lineHeight: 1.45 }}>{stallTip}</p> : null}
 
+      {jump && !compact ? <JumpCard jump={jump} color={lineColor} /> : null}
+
       {series.length >= 2 ? (
-        <div className="card" style={{ padding: "12px 10px 6px", marginBottom: 12 }}>
-          <div style={{ fontSize: 13, fontWeight: 650, color: c.ink3, padding: "0 6px 6px" }}>{hasE ? "Estimated 1RM" : bw ? "Added weight" : "Top weight"}</div>
-          <LineChart points={series.map(s => ({ t: s.date, v: hasE ? s.e1rm : s.top }))} color={lineColor} height={compact ? 120 : 150} />
+        <div className="card" style={{ padding: "10px 10px 6px", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px 8px", gap: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 650, color: c.ink3 }}>
+              {chartMode === "weight" ? "Weight, with reps" : hasE ? "Estimated 1RM" : bw ? "Added weight" : "Top weight"}
+            </div>
+            {hasE ? (
+              <div style={{ display: "flex", background: c.inset, borderRadius: 9, padding: 2, flexShrink: 0 }}>
+                {[["e1rm", "Est. 1RM"], ["weight", "Weight"]].map(([k, l]) => (
+                  <button
+                    key={k}
+                    onClick={() => setChartMode(k)}
+                    className="tap"
+                    aria-pressed={chartMode === k}
+                    style={{ padding: "5px 9px", borderRadius: 7, fontSize: 12, fontWeight: 750, background: chartMode === k ? c.surface : "transparent", color: chartMode === k ? c.ink : c.ink3 }}
+                  >{l}</button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          {chartMode === "weight" || !hasE ? (
+            <StepChart points={series.map(s => ({ t: s.date, v: s.top, reps: s.topReps }))} color={lineColor} height={compact ? 130 : 160} bw={bw} />
+          ) : (
+            <LineChart
+              points={series.map(s => ({ t: s.date, v: s.e1rm }))}
+              color={lineColor}
+              height={compact ? 130 : 160}
+              projection={gp && gp.status === "pace" && gp.targetE ? { t: gp.date, v: gp.targetE, label: `${gp.goal}×${gp.reps}` } : undefined}
+            />
+          )}
         </div>
       ) : null}
 
