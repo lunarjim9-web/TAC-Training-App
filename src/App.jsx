@@ -4,7 +4,7 @@ import {
   TrendingUp, Activity, BarChart3, ClipboardList,
   Trophy, Download, Upload, Trash2, X, Shield,
   Repeat, Copy, Flame, Timer, SkipForward, MoreHorizontal,
-  FileText, Search, Undo2, ArrowRight, Pencil, ChevronUp, ChevronDown, Settings,
+  FileText, Search, Undo2, ArrowRight, Pencil, ChevronUp, ChevronDown, Settings, Info,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 
@@ -151,7 +151,7 @@ const c = {
 // Extra clearance at the top of each screen, on top of the phone's safe area.
 // 0 for the standalone app; set to ~52 if viewing inside Claude's full-screen
 // artifact view, whose floating close/menu buttons sit over the top corners.
-const TOP_GAP = 0;
+const TOP_GAP = 14;
 
 const a = (color, pct) => `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 
@@ -273,7 +273,7 @@ const K_SETTINGS = "tac_settings_v2";
 const DEFAULT_SETTINGS = {
   bodyweight: 0, target: 3, theme: "system",
   notes: {}, perSide: {}, bars: {}, aliases: {}, routine: null,
-  recapSeen: null, lastBackup: 0, tipDismissed: false, goals: {},
+  recapSeen: null, lastBackup: 0, tipDismissed: false, goals: {}, name: "Peter",
 };
 let SETTINGS = { ...DEFAULT_SETTINGS };
 let STORE_MODE = "device"; // becomes "claude" once artifact storage accepts a write
@@ -2871,7 +2871,7 @@ function HomeScreen({ history, active, target, onTargetChange, onStart, onResume
         <PlateRings size={330} style={{ right: -120, top: -30 }} />
         <div style={{ position: "relative" }}>
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-            <span className="serif" style={{ fontSize: 22 }}>{greet()}, Peter</span>
+            <span className="serif" style={{ fontSize: 22 }}>{greet()}{SETTINGS.name ? `, ${SETTINGS.name}` : ""}</span>
             <span style={{ fontSize: 11, fontWeight: 750, letterSpacing: "0.18em", opacity: 0.8, flexShrink: 0 }}>
               {active ? "IN PROGRESS" : "UP NEXT"}
             </span>
@@ -4840,6 +4840,38 @@ function ExerciseListSheet({ current, otherNames, history, onPick, onClose }) {
   );
 }
 
+// Name used in the greeting; saves when you leave the field
+function NameRow() {
+  const [val, setVal] = useState(SETTINGS.name || "");
+  const commit = () => {
+    const v = val.trim().slice(0, 24);
+    setVal(v);
+    if (v !== (SETTINGS.name || "")) saveSettings({ name: v });
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px" }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 15, fontWeight: 650 }}>Name</div>
+        <div style={{ fontSize: 13, color: c.ink3, marginTop: 1 }}>Shown in the greeting on Today</div>
+      </div>
+      <input
+        type="text"
+        value={val}
+        placeholder="Your name"
+        aria-label="Your name"
+        autoComplete="given-name"
+        autoCapitalize="words"
+        enterKeyHint="done"
+        maxLength={24}
+        onChange={e => setVal(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
+        style={{ width: 150, height: 44, padding: "0 12px", borderRadius: 12, border: `1px solid ${c.line}`, background: c.surface, textAlign: "right", fontSize: 16, fontWeight: 650 }}
+      />
+    </div>
+  );
+}
+
 function DataView({
   history, bodyweight, onBodyweightChange, themePref, onThemeChange,
   onExportClaude, onCopyClaude, onExportExcel, onBackup, onRestore, daysSince, onEditRoutine,
@@ -4950,7 +4982,8 @@ function DataView({
 
       <Section title="Your numbers">
         <div className="card" style={{ overflow: "hidden" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px" }}>
+          <NameRow />
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", borderTop: `1px solid ${c.lineSoft}` }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 15, fontWeight: 650 }}>Bodyweight</div>
               <div style={{ fontSize: 13, color: c.ink3, marginTop: 1 }}>Used for pull-up volume</div>
@@ -5400,6 +5433,7 @@ function StrengthView({ history, onOpenExercise }) {
   }, [history, idx]);
   const [showAll, setShowAll] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [info, setInfo] = useState(false);
   const mainCount = lifts.filter(l => l.main).length || Math.min(6, lifts.length);
   const shown = showAll ? lifts : lifts.slice(0, mainCount);
   const up = idx && idx.change >= 0;
@@ -5411,7 +5445,15 @@ function StrengthView({ history, onOpenExercise }) {
       <Section>
         <div className="card" style={{ padding: "18px 16px 10px" }}>
           <div style={{ padding: "0 4px" }}>
-            <div style={{ fontSize: 14, fontWeight: 650, color: c.ink3 }}>Strength Index</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 14, fontWeight: 650, color: c.ink3 }}>Strength Index</div>
+              <button
+                onClick={() => setInfo(true)}
+                className="tap"
+                aria-label="How the Strength Index works"
+                style={{ width: 36, height: 36, margin: "-8px -8px -8px 0", borderRadius: 99, display: "flex", alignItems: "center", justifyContent: "center", color: c.ink3 }}
+              ><Info size={18} strokeWidth={2.2} /></button>
+            </div>
             {idx ? (
               <>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 6 }}>
@@ -5483,6 +5525,8 @@ function StrengthView({ history, onOpenExercise }) {
         </p>
       </Section>
 
+      {info ? <StrengthInfoSheet idx={idx} onClose={() => setInfo(false)} /> : null}
+
       {picking ? (
         <ExerciseListSheet
           current={null}
@@ -5493,6 +5537,42 @@ function StrengthView({ history, onOpenExercise }) {
         />
       ) : null}
     </div>
+  );
+}
+
+function StrengthInfoSheet({ idx, onClose }) {
+  const P = ({ children }) => <p style={{ margin: "0 0 12px", fontSize: 15, color: c.ink2, lineHeight: 1.55 }}>{children}</p>;
+  const H = ({ children }) => <div style={{ fontSize: 15, fontWeight: 800, margin: "18px 0 6px" }}>{children}</div>;
+  return (
+    <BottomSheet title="How the Strength Index works" onClose={onClose}>
+      <P>One number for "am I getting stronger?", averaged across your main lifts so one good or bad day on a single lift doesn't swing it.</P>
+
+      <H>How it's calculated</H>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "4px 0 6px" }}>
+        {[
+          ["Estimate your 1-rep max", "for every working set, using the Epley formula: weight × (1 + reps ÷ 30). Your best set each session counts."],
+          ["Compare each lift to itself", "Your latest sessions (up to 3, averaged) versus your first ones. 100 = where you started."],
+          ["Average across lifts", "Your main lifts, the first two of each day, count equally. +6% means they're up about 6% on average."],
+        ].map(([k, v], i) => (
+          <div key={i} style={{ display: "flex", gap: 12 }}>
+            <span className="display num" style={{ fontSize: 22, minWidth: 16, color: c.good }}>{i + 1}</span>
+            <div style={{ fontSize: 15, color: c.ink2, lineHeight: 1.5 }}><strong style={{ color: c.ink }}>{k}</strong> {v}</div>
+          </div>
+        ))}
+      </div>
+      {idx && idx.lifts ? (
+        <div style={{ fontSize: 13, color: c.ink3, margin: "6px 0 0" }}>
+          Counting now: {idx.lifts.map(l => shortLiftName(l.name)).join(", ")}.
+        </div>
+      ) : null}
+
+      <H>Why it's a good measure</H>
+      <P>Double progression moves weight and reps in turn, so "heaviest weight" stays flat for weeks even while you're improving. An estimated 1RM rises whether you add a rep or add a plate, so it captures both kinds of progress in one number.</P>
+      <P>Each lift is compared to itself in percentage terms, so a 10 lb gain on shoulder press (a big jump there) isn't drowned out by 10 lb on leg press (a small one). Averaging over several sessions smooths out one-off good or bad days.</P>
+
+      <H>What to keep in mind</H>
+      <P>The absolute 1RM estimate can be off by 5–10% at 8–12 reps, but the trend is reliable because the error is about the same each week. Changing machines, grips or rep ranges can shift a lift's line, so judge it over a few weeks rather than day to day.</P>
+    </BottomSheet>
   );
 }
 
